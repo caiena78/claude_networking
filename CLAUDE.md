@@ -14,6 +14,8 @@ Looks up how an IP or prefix is routed across the WAN routers. Router credential
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |
 | `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI (`sites`, `devices`, `offline`, `get <path>`). Use it for all Meraki access |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
+| `vault_login.ps1` / `vault_login.sh` | Vault OIDC login in a private browser window (Windows / macOS). The token is never printed |
+| `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user |
 | `vault_list.py` | Lists the Vault secrets the logged-in account can see. Also used to sign in as a different user |
 | `requirements.txt` | Python dependencies |
 | `.env` | `VAULT_ADDR`, `VAULT_MOUNT` and `VAULT_PATH` (not secrets). It may also hold `LCMC_CACERT`, a path to the EPIC-CA root PEM |
@@ -252,7 +254,16 @@ $env:VAULT_ADDR = "<value of VAULT_ADDR in .env>"
 vault login -method=oidc
 ```
 
-To sign in as a **different account** (the browser otherwise reuses the current Microsoft session):
+**If the normal login picks the wrong Microsoft account** (for example a Sapphire account, which fails with `samaccountname not found`), use the private-browser login scripts. Each one runs `vault login -method=oidc -no-print`, opens the login URL in a private window, and saves the token to `~/.vault-token`:
+
+```
+powershell -ExecutionPolicy Bypass -File .\vault_login.ps1      # Windows: Edge InPrivate (-Browser chrome|firefox, -Prompt login)
+./vault_login.sh                                               # macOS: Chrome incognito (-b edge|firefox, -p login)
+```
+
+These are interactive. Ask the user to run them, or run one only when the user asks, because the user has to finish the sign-in in the browser.
+
+Alternatively, to sign in as a **different account** (the browser otherwise reuses the current Microsoft session):
 
 ```
 python vault_list.py --private --prompt login
