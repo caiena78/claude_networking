@@ -108,6 +108,8 @@ python meraki_helper.py sites                          # every network: device c
 python meraki_helper.py devices --network PUC_Kenner   # devices + status, LAN/public IP, last reported
 python meraki_helper.py devices --type appliance       # filter by productType
 python meraki_helper.py offline                        # every device whose status is not online
+python meraki_helper.py ssids                          # enabled SSIDs: networks, APs broadcasting, APs online, auth mode
+python meraki_helper.py ssids --by-network [--network PUC]   # one row per network + SSID (slot number, tag scoping)
 python meraki_helper.py get organizations/{org}/appliance/vpn/statuses
 python meraki_helper.py get networks/<networkId>/clients -p timespan=3600
 python meraki_helper.py get organizations/{org}/devices -p "productTypes[]=switch" --one-page
