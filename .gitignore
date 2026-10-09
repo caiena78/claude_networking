@@ -1,0 +1,26 @@
+# Environment files (Vault address, mount, path; .env.old holds a secret ID)
+.env
+.env.*
+
+# Router config dumps and script output (credentials, internal topology)
+*.txt
+!requirements.txt
+!claude_prompt.txt
+*.json
+*.cfg
+*.log
+
+# Vault tokens, if one is ever saved here
+.vault-token
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
