@@ -14,6 +14,8 @@ Read-only network tools for LCMC Health. Each `*_helper.py` script covers one sy
 
 Every helper is read-only. All credentials come from Vault; nothing is stored in this folder. Add `--json` to most commands for machine-readable output, and `-h` to any command for its options.
 
+The examples below use placeholder names and addresses (`site1-wan-rtr-01`, `192.0.2.x`, `00:11:22:33:44:55` and so on). Replace them with your own.
+
 ## Setup
 
 1. Install the Vault CLI:
@@ -27,7 +29,7 @@ Every helper is read-only. All credentials come from Vault; nothing is stored in
 
        powershell -ExecutionPolicy Bypass -File .\set_vault_addr.ps1
 
-4. Create `.env` with `VAULT_ADDR`, `VAULT_MOUNT`, `VAULT_PATH` and `LCMC_CACERT=certs/lcmc-epic-ca.pem`. The CA file lets Python trust LCMC's internal certificates, which ISE and Catalyst Center use.
+4. Create `.env` with `VAULT_ADDR`, `VAULT_MOUNT`, `VAULT_PATH` and `LCMC_CACERT=certs/lcmc-epic-ca.pem`. The CA file lets Python trust the internal certificates that ISE and Catalyst Center use.
 
 ## Logging in to Vault
 
@@ -43,12 +45,12 @@ If the browser signs in with the wrong Microsoft account (for example a xyzcorp 
 
 ## netbox_helper.py — inventory
 
-    python netbox_helper.py sites --name Lake                        # sites whose name contains "Lake"
-    python netbox_helper.py devices --site Lakeside --tag wan_router # devices with management IP, role, model, platform
-    python netbox_helper.py devices --site "Lakeview Hospital" --name wlc
-    python netbox_helper.py device lakeview-wlc-ha01                 # full record: model, serial, platform, IP, tags
-    python netbox_helper.py ip 10.158.8.21                           # which device and interface has an IP
-    python netbox_helper.py prefix 10.158.10.25                      # prefixes containing an IP (site, VLAN, VRF)
+    python netbox_helper.py sites --name Site                        # sites whose name contains "Site"
+    python netbox_helper.py devices --site "Site 1" --tag wan_router # devices with management IP, role, model, platform
+    python netbox_helper.py devices --site "Site 1" --name wlc
+    python netbox_helper.py device site1-wlc-01                      # full record: model, serial, platform, IP, tags
+    python netbox_helper.py ip 192.0.2.21                            # which device and interface has an IP
+    python netbox_helper.py prefix 192.0.2.25                        # prefixes containing an IP (site, VLAN, VRF)
     python netbox_helper.py tags
 
 ## cisco_helper.py — show commands on Cisco devices
@@ -56,43 +58,43 @@ If the browser signs in with the wrong Microsoft account (for example a xyzcorp 
 Choose devices with `-d <name or IP>` (repeatable), `--site`, `--tag` or `--name`. Names are looked up in NetBox. Only `show` commands are sent, and passwords, keys and communities are masked in config output.
 
     python cisco_helper.py list                                       # all built-in commands
-    python cisco_helper.py uptime --site Lakeside --tag wan_router
-    python cisco_helper.py version -d tls-wan-rtr-01
-    python cisco_helper.py interfaces -d tls-wan-rtr-01               # show ip interface brief
-    python cisco_helper.py interface Te0/1/0 -d tls-wan-rtr-01
-    python cisco_helper.py errors -d tls-wan-rtr-01                   # CRC / input / output errors
-    python cisco_helper.py section "router bgp" -d tls-wan-rtr-01     # one config section
-    python cisco_helper.py run -d tls-wan-rtr-01 -o tls-01-config.txt # full config, saved to a file
-    python cisco_helper.py log -d tls-wan-rtr-01 --lines 100
+    python cisco_helper.py uptime --site "Site 1" --tag wan_router
+    python cisco_helper.py version -d site1-wan-rtr-01
+    python cisco_helper.py interfaces -d site1-wan-rtr-01             # show ip interface brief
+    python cisco_helper.py interface Te0/1/0 -d site1-wan-rtr-01
+    python cisco_helper.py errors -d site1-wan-rtr-01                 # CRC / input / output errors
+    python cisco_helper.py section "router bgp" -d site1-wan-rtr-01   # one config section
+    python cisco_helper.py run -d site1-wan-rtr-01 -o site1-config.txt   # full config, saved to a file
+    python cisco_helper.py log -d site1-wan-rtr-01 --lines 100
     python cisco_helper.py bgp --tag wan_router                       # also: ospf, eigrp, standby, vrrp
-    python cisco_helper.py cdp -d tls-wan-rtr-01                      # also: cdp-detail, lldp
-    python cisco_helper.py arp 10.158.136.10 -d tls-wan-rtr-01        # also: mac <mac>
-    python cisco_helper.py cpu -d tls-wan-rtr-01                      # also: memory, env, inventory, transceivers, ntp
-    python cisco_helper.py interfaces -d tls-wan-rtr-01 --parse --json   # structured output (TextFSM)
-    python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01   # any single show command
+    python cisco_helper.py cdp -d site1-wan-rtr-01                    # also: cdp-detail, lldp
+    python cisco_helper.py arp 192.0.2.10 -d site1-wan-rtr-01         # also: mac <mac>
+    python cisco_helper.py cpu -d site1-wan-rtr-01                    # also: memory, env, inventory, transceivers, ntp
+    python cisco_helper.py interfaces -d site1-wan-rtr-01 --parse --json   # structured output (TextFSM)
+    python cisco_helper.py show "show ip nat translations total" -d site1-wan-rtr-01   # any single show command
 
 Route lookups run on every WAN router (NetBox tag `wan_router`) unless you pick devices. The summary shows the prefix, protocol, next hops and outgoing interfaces:
 
-    python cisco_helper.py route 10.158.8.1
-    python cisco_helper.py route 10.158.8.0/24 --site Lakeside --vrf CORP
-    python cisco_helper.py route 10.158.8.1 --json
+    python cisco_helper.py route 192.0.2.1
+    python cisco_helper.py route 192.0.2.0/24 --site "Site 1" --vrf CORP
+    python cisco_helper.py route 192.0.2.1 --json
 
 Wireless (Catalyst 9800 controllers):
 
-    python cisco_helper.py wlans -d lakeview-wlc-ha01                 # WLAN / SSID summary
-    python cisco_helper.py ssid LCMC-DATA -d lakeview-wlc-ha01 -o lakeviewssid.txt           # all config for one SSID
-    python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt --append
+    python cisco_helper.py wlans -d site1-wlc-01                      # WLAN / SSID summary
+    python cisco_helper.py ssid CORP-DATA -d site1-wlc-01 -o site1-ssids.txt            # all config for one SSID
+    python cisco_helper.py ssid CORP-VOICE -d site1-wlc-01 -o site1-ssids.txt --append
 
 ## catalyst_helper.py — Catalyst Center
 
     python catalyst_helper.py count                                 # devices in inventory
-    python catalyst_helper.py devices --hostname "TLS-.*"           # hostname filters are case-sensitive
+    python catalyst_helper.py devices --hostname "SITE1-.*"         # hostname filters are case-sensitive
     python catalyst_helper.py devices --family "Switches and Hubs" --limit 50   # exact family name
     python catalyst_helper.py devices --reachability Unreachable
-    python catalyst_helper.py device tls-wan-rtr-01                 # by hostname, IP, serial or id
-    python catalyst_helper.py interfaces 10.158.136.51
-    python catalyst_helper.py config tls-wan-rtr-01                 # config as collected by Catalyst Center
-    python catalyst_helper.py client 7e:f6:2b:a0:38:5d              # where a client is connected (AP/switch, SSID, VLAN)
+    python catalyst_helper.py device site1-wan-rtr-01               # by hostname, IP, serial or id
+    python catalyst_helper.py interfaces 192.0.2.51
+    python catalyst_helper.py config site1-wan-rtr-01               # config as collected by Catalyst Center
+    python catalyst_helper.py client 00:11:22:33:44:55              # where a client is connected (AP/switch, SSID, VLAN)
     python catalyst_helper.py sites
     python catalyst_helper.py health                                # site health
     python catalyst_helper.py device-health --health POOR
@@ -102,11 +104,11 @@ Wireless (Catalyst 9800 controllers):
 ## ise_helper.py — Cisco ISE
 
     python ise_helper.py lookup 0011.2233.4455                      # endpoint record + live session for a MAC
-    python ise_helper.py session 10.158.64.65                       # live session by MAC, IP or username
+    python ise_helper.py session 192.0.2.65                         # live session by MAC, IP or username
     python ise_helper.py auth 00:11:22:33:44:55 --hours 24          # recent authentications, including failures
     python ise_helper.py active --count                             # number of active sessions
     python ise_helper.py active --protocols                         # sessions by EAP-TLS / PEAP / MAB
-    python ise_helper.py nad 10.158.136.51                          # network device by IP or name
+    python ise_helper.py nad 192.0.2.51                             # network device by IP or name
     python ise_helper.py nads --name WAN
     python ise_helper.py groups                                     # endpoint identity groups
     python ise_helper.py nodes                                      # deployment nodes and roles
@@ -116,22 +118,22 @@ Wireless (Catalyst 9800 controllers):
 ## meraki_helper.py — Meraki Dashboard
 
     python meraki_helper.py sites                                   # networks with device and online counts
-    python meraki_helper.py devices --network PUC_Kenner
+    python meraki_helper.py devices --network Branch-01
     python meraki_helper.py devices --type appliance
     python meraki_helper.py offline                                 # devices that aren't online
     python meraki_helper.py ssids                                   # SSIDs and how many APs broadcast them
-    python meraki_helper.py ssids --by-network --network PUC
-    python meraki_helper.py get "organizations/{org}/clients/search" -p mac=ca:b2:60:60:17:87 --one-page
+    python meraki_helper.py ssids --by-network --network Branch
+    python meraki_helper.py get "organizations/{org}/clients/search" -p mac=00:11:22:33:44:55 --one-page
     python meraki_helper.py get networks/<networkId>/appliance/vlans   # any API path (no leading slash)
 
 ## ordr_helper.py — Ordr
 
-    python ordr_helper.py device 00:00:00:03:2E:25                  # by MAC (any format), IP, or short hostname
-    python ordr_helper.py device 10.158.10.25 --include connectivity-info
+    python ordr_helper.py device 00:11:22:33:44:55                  # by MAC (any format), IP, or short hostname
+    python ordr_helper.py device 192.0.2.25 --include connectivity-info
     python ordr_helper.py devices --group Workstations --risk HIGH --limit 50
     python ordr_helper.py devices --conn-status ONLINE_IN_LAST_24_HRS --limit 0
     python ordr_helper.py alarms --severity high --limit 20
-    python ordr_helper.py vulns --mac 00:00:00:03:2E:25
+    python ordr_helper.py vulns --mac 00:11:22:33:44:55
     python ordr_helper.py summary                                   # alarm and vulnerability summaries
     python ordr_helper.py profiles
     python ordr_helper.py get Rest/Devices -p mfg=Philips --all     # any API path
