@@ -63,20 +63,35 @@ def _host_for(device: Any) -> str | None:
     return device.name or None
 
 
+def resolve_site(nb: pynetbox.api, site: str) -> str:
+    """Return the slug for a site given its slug, exact name, or a unique part of its name."""
+    if nb.dcim.sites.get(slug=site):
+        return site
+    matches = list(nb.dcim.sites.filter(name__ie=site)) or list(nb.dcim.sites.filter(name__ic=site))
+    if len(matches) == 1:
+        return matches[0].slug
+    if not matches:
+        raise ValueError(f"no NetBox site matches {site!r}")
+    raise ValueError(f"{site!r} matches {len(matches)} sites: {', '.join(s.name for s in matches[:10])}")
+
+
 def get_devices(
     nb: pynetbox.api,
-    tag: str = "wan_router",
+    tag: str | None = "wan_router",
     site: str | None = None,
     name_contains: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Return (devices, skipped) for every device with the tag.
+    """Return (devices, skipped) matching the filters. tag=None means any tag.
+    site can be a slug, a site name, or a unique part of a site name.
 
     Each device dict has: name, host, platform, device_type, site, status.
     Each skipped dict has: name, reason.
     """
-    filters: dict[str, Any] = {"tag": tag}
+    filters: dict[str, Any] = {}
+    if tag:
+        filters["tag"] = tag
     if site:
-        filters["site"] = site
+        filters["site"] = resolve_site(nb, site)
     if name_contains:
         filters["name__ic"] = name_contains
 

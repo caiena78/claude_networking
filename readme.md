@@ -27,8 +27,8 @@ Sign in as a different account instead:
 
 Look up a route on every NetBox device tagged wan_router:
 
-    python route.py 10.158.8.1
-    python route.py 10.158.8.0/24 --site <site-slug> --vrf <vrf>
-    python route.py 10.158.8.1 --json
+    python cisco_helper.py route 10.158.8.1
+    python cisco_helper.py route 10.158.8.0/24 --site <site> --vrf <vrf>
+    python cisco_helper.py route 10.158.8.1 --json
 
 

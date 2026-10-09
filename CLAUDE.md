@@ -6,7 +6,7 @@ Looks up how an IP or prefix is routed across the WAN routers. Router credential
 
 | File | Role |
 |---|---|
-| `route.py` | Entry point. Validates the IP, gets credentials and devices, runs the show command on each router in parallel, and prints the results per router plus a summary |
+| `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command). Use it for everything run on a device |
 | `vault_helper.py` | Vault login (token from `VAULT_TOKEN`, then `~/.vault-token`, then OIDC browser login), `get_secrets()` (router and NetBox credentials) and `get_secret(key)` (any one key, e.g. `meraki_api`) |
 | `netbox_helper.py` | `get_devices()` returns the tagged devices, plus `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `catalyst_helper.py` | Read-only Cisco Catalyst Center (DNA Center) client and CLI (`devices`, `device`, `count`, `interfaces`, `config`, `client`, `sites`, `health`, `device-health`, `issues`, `get <path>`). Use it for all Catalyst Center access |
@@ -28,10 +28,10 @@ Vault secrets at `VAULT_MOUNT`/`VAULT_PATH`: `ansible_user`, `ansible_password`,
 Requests like "show me routes for 10.158.8.1", "where is 10.x.x.x routed" or "which router has a route to 10.158.8.0/24" mean:
 
 ```
-python route.py <ip-or-prefix> --json
+python cisco_helper.py route <ip-or-prefix> --json
 ```
 
-Add `--site <slug>`, `--device <name text>` or `--vrf <name>` only when the user asks for them. Use `--json` so the output is easy to parse. The `result` field is `found`, `not found` or `error`.
+With no device options, this runs on every NetBox device tagged `wan_router`. Add `--site <name>`, `-d <device>` or `--vrf <name>` only when the user asks for them. In the JSON, each result's `route_result` is `found`, `not found` or `error`, and `output` holds the router's output.
 
 Then summarize for the user:
 - which routers have the route, and for each one the matched prefix, the next hop, the outgoing interface, the protocol (BGP, OSPF, static, connected and so on) and the AD/metric if shown;
@@ -41,6 +41,45 @@ Then summarize for the user:
 Show the full raw output only if the user asks for it (`--raw` or the default rich output).
 
 Exit codes: 0 = found on at least one router, 1 = not found anywhere, 2 = setup error (Vault, NetBox or a bad argument).
+
+## Running commands on Cisco devices
+
+**Use `cisco_helper.py` for anything run on a router or switch.** Never write ad-hoc netmiko or Python snippets. If a command or option is missing, add it to `cisco_helper.py` (the `COMMANDS` table), or to the right helper for the other systems, then use it. The helper reads the SSH credentials from Vault, finds devices through NetBox, runs on many devices at once, only sends single `show` commands (it refuses anything else and any `| redirect/tee/append/copy`), and masks passwords, keys, communities and hashes in config output.
+
+Choosing devices (combine as needed; at most 25 by default, change with `--max-devices`):
+- `-d <name|ip>` (repeatable). Names are looked up in NetBox (exact name, else name contains). IPs connect directly as `cisco_ios` (set `--device-type`).
+- `--site <name or slug>`, e.g. `--site Lakeside`. `--tag <tag>`, e.g. `--tag wan_router`. `--name <text>`.
+- Lakeside = `tls-*`, Lakeview = `lvr-*`, East Jefferson = `ej-*`, and so on (see `bgp_community.txt`).
+
+```
+python cisco_helper.py list                                       # every built-in command
+python cisco_helper.py uptime --site Lakeside --tag wan_router
+python cisco_helper.py version -d tls-wan-rtr-01
+python cisco_helper.py interfaces -d tls-wan-rtr-01               # show ip interface brief
+python cisco_helper.py interface Te0/1/0 -d tls-wan-rtr-01
+python cisco_helper.py errors -d tls-wan-rtr-01                   # CRC, input/output errors, drops
+python cisco_helper.py section "router bgp" -d tls-wan-rtr-01     # config section, secrets masked
+python cisco_helper.py run -d tls-wan-rtr-01                      # full running config, secrets masked
+python cisco_helper.py log -d tls-wan-rtr-01 --lines 100
+python cisco_helper.py bgp --tag wan_router                       # also ospf, eigrp, standby, vrrp
+python cisco_helper.py cdp -d tls-wan-rtr-01                      # also cdp-detail, lldp
+python cisco_helper.py arp 10.158.136.10 -d tls-wan-rtr-01        # also mac [mac]
+python cisco_helper.py route 10.158.10.1                          # route lookup on all wan_router devices
+python cisco_helper.py cpu -d tls-wan-rtr-01                      # also memory, env, inventory, transceivers, ntp, clock, license, sla
+python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01   # any single show command
+python cisco_helper.py wlans -d lakeview-wlc-ha01                 # Catalyst 9800: WLAN/SSID summary
+python cisco_helper.py ssid LCMC-DATA -d lakeview-wlc-ha01 -o lakeviewssid.txt   # all config for an SSID
+python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt --append
+```
+
+- `-o FILE` also writes the results to a file (`--append` adds to it). Use it when the user asks for output in a file. `.gitignore` excludes `*.txt`.
+- `ssid <name>` (Catalyst 9800) matches the SSID or the WLAN profile name, so it handles one SSID on several profiles (e.g. LCMC-DATA = `LCMC-DATA_SBH` and `LCMC-DATA_profile`). For each profile it collects the `wlan` config, the policy tags that map it, each policy profile's config, and `show wlan name`. PSKs (`set-key`) are masked.
+- 9800 WLCs are IOS-XE (`cisco_xe`) in NetBox, e.g. `lakeview-wlc-ha01` (10.158.8.21), `lakeview-wlc-stby`, `lakeview-wlc-guest01`.
+
+- `--json` gives `[{device, host, site, command, output, error}]` (route lookups add `route_result`). `--parse` turns the output into structured data with TextFSM (ntc-templates) where a template exists, e.g. `interfaces --parse --json`.
+- A device that rejects a command (`% Invalid input`) is reported as an error. One failing device never stops the others.
+- Exit codes: 0 = every device answered, 1 = at least one failed, 2 = setup error. For `route <ip>`: 0 = found somewhere, 1 = found nowhere.
+- Even with masking, quote only the config lines that answer the question.
 
 ## Cisco Meraki
 
@@ -83,7 +122,7 @@ Summarize the results for the user. Show raw JSON only when they ask for it. The
 
 ## Ordr
 
-Use Ordr for questions about what an endpoint **is**: device identity and classification (group, profile, manufacturer, model, OS), risk, security alarms, vulnerabilities, where a device sits on the network, and its flows and applications. It is especially useful for medical and IoT devices. Use Meraki for Meraki network and client state, and `route.py` for routing.
+Use Ordr for questions about what an endpoint **is**: device identity and classification (group, profile, manufacturer, model, OS), risk, security alarms, vulnerabilities, where a device sits on the network, and its flows and applications. It is especially useful for medical and IoT devices. Use Meraki for Meraki network and client state, and `cisco_helper.py route` for routing.
 
 **Always use `ordr_helper.py` for Ordr.** Don't write ad-hoc `requests` calls. It reads `ORDR_URL`, `ORDR_USER`, `ORDR_PASSWORD` and `ORDR_TENANTGUID` from Vault in one call (`vault_helper.get_secret_values()`), uses HTTP basic auth, adds `tenantGuid` to every request (the API requires it), follows `MetaData.next` pagination, and retries on `429`. It only sends `GET` requests.
 
@@ -136,7 +175,7 @@ Summarize the results for the user. Show raw JSON only when they ask for it. Dev
 
 ## Cisco Catalyst Center
 
-Use Catalyst Center (formerly DNA Center) for questions about **managed network devices and assurance**: the inventory of switches, routers, WLCs and APs (hostname, management IP, model, software version, serial, reachability, uptime), device interfaces, the running config Catalyst Center has collected, the site hierarchy, site and device health, assurance issues, and client details such as where a MAC is connected. ISE covers authentication, Ordr covers what an endpoint is, Meraki covers Meraki networks, and `route.py` gives live routing from the WAN routers.
+Use Catalyst Center (formerly DNA Center) for questions about **managed network devices and assurance**: the inventory of switches, routers, WLCs and APs (hostname, management IP, model, software version, serial, reachability, uptime), device interfaces, the running config Catalyst Center has collected, the site hierarchy, site and device health, assurance issues, and client details such as where a MAC is connected. ISE covers authentication, Ordr covers what an endpoint is, Meraki covers Meraki networks, and `cisco_helper.py route` gives live routing from the WAN routers.
 
 **Always use `catalyst_helper.py` for Catalyst Center.** Don't write ad-hoc `requests` calls. It reads `cat_url`, `cat_user` and `cat_password` from Vault in one call. It gets an auth token (`POST /dna/system/api/v1/auth/token`, the only non-GET call it makes), sends it as `X-Auth-Token`, refreshes it on 401 (tokens last about an hour), pages with `offset` (starting at 1) and `limit` (max 500), and retries on 429. Paths without a `dna/` prefix are treated as relative to `dna/intent/api/v1/`.
 
@@ -183,7 +222,7 @@ Summarize the results for the user. Show raw JSON only when they ask for it.
 
 ## Cisco ISE
 
-Use ISE for questions about **network access**: where a MAC, IP or user is authenticated right now (switch, port or WLC/AP), how it authenticated (802.1X or MAB, which policy, which authorization profile, VLAN or SGT), its endpoint profile and identity group, its recent auth failures, and which network devices (NADs) are defined in ISE. Ordr answers what a device *is*, Meraki covers Meraki networks, and `route.py` covers routing.
+Use ISE for questions about **network access**: where a MAC, IP or user is authenticated right now (switch, port or WLC/AP), how it authenticated (802.1X or MAB, which policy, which authorization profile, VLAN or SGT), its endpoint profile and identity group, its recent auth failures, and which network devices (NADs) are defined in ISE. Ordr answers what a device *is*, Meraki covers Meraki networks, and `cisco_helper.py route` covers routing.
 
 **Always use `ise_helper.py` for ISE.** Don't write ad-hoc `requests` calls. It reads `ise_url`, `ise_user` and `ise_password` from Vault in one call. ISE is `umc-ise-pan-01.lcmchealth.org` (the PAN).
 
@@ -247,7 +286,7 @@ Summarize the results for the user. Show raw JSON only when they ask for it.
 
 ## Vault login
 
-`route.py` reuses `VAULT_TOKEN` or `~/.vault-token`. If neither is valid, it opens a browser OIDC login and saves the new token to `~/.vault-token`. To log in beforehand:
+The helpers reuse `VAULT_TOKEN` or `~/.vault-token`. If neither is valid, it opens a browser OIDC login and saves the new token to `~/.vault-token`. To log in beforehand:
 
 ```powershell
 $env:VAULT_ADDR = "<value of VAULT_ADDR in .env>"
@@ -269,7 +308,7 @@ Alternatively, to sign in as a **different account** (the browser otherwise reus
 python vault_list.py --private --prompt login
 ```
 
-This opens an Edge InPrivate window, asks for a username and password, and saves the token for `route.py` to use.
+This opens an Edge InPrivate window, asks for a username and password, and saves the token for the helpers to use.
 
 Known problem: `claim "samaccountname" not found in token` means the account used to sign in has no on-prem sAMAccountName in LCMC's tenant, for example a guest or B2B account such as a Sapphire account. The fix is to sign in with an LCMC account. Do not change the code to work around it.
 
@@ -282,19 +321,20 @@ Known problem: `claim "samaccountname" not found in token` means the account use
 - Ordr is **read-only**: go through `ordr_helper.py`, which only sends `GET` requests. Never call the Ordr write endpoints (`POST /Rest/SecurityAlarm/StateChange` clears alarms, `POST /Rest/SecurityAlarms/mute` mutes them, and so on for `Vulnerabilities/StateChange`, `UpdateAssetInfo`, `DeviceOnboard`, `UserLocations` and `UserRole`), unless the user explicitly asks for that specific change and confirms it.
 - Never put secrets in `.env`. Do not touch `.env.old`.
 - Only read-only `show` commands on the routers. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state.
-- Ask before querying routers for anything other than a route lookup the user asked for.
+- **No ad-hoc snippets.** Use the helpers (`cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it.
+- Run show commands on devices only when the user asks for information from them. Keep to the devices the question needs.
 
 ## Adding a platform
 
 1. `netbox_helper.py`: add the NetBox platform slug to `PLATFORM_MAP`, mapped to a netmiko device_type. Unknown slugs fall back to `cisco_ios`, with a warning.
-2. `route.py`: add a branch for that device_type in `build_command()`. If the platform needs enable mode, add it to `NEEDS_ENABLE`. If its "not found" text is new, add it to `NOT_FOUND_PATTERNS`.
+2. `cisco_helper.py`: if the platform's route command differs, add a branch in `route_command()`. If its "not found" text is new, add it to `ROUTE_NOT_FOUND`. For other commands, add a platform column or override in `COMMANDS`.
 
 ## Setup
 
 ```
 python -m pip install -r requirements.txt
 vault version          # Vault CLI, already installed at C:\Program Files\vault\vault.exe
-python route.py --help
+python cisco_helper.py list
 ```
 
 If Vault or NetBox use an internal CA, `truststore` lets Python use the Windows certificate store. Otherwise set `VAULT_CACERT`.
