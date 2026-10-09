@@ -146,6 +146,26 @@ def route_command(device_type: str, target: Any, vrf: str | None = None) -> str:
     return f"show {ip_kw} route {'vrf ' + vrf + ' ' if vrf else ''}{ios_target}"
 
 
+def parse_route(output: str) -> dict[str, Any]:
+    """Pull the matched prefix, protocol, AD/metric and next hops (with interfaces) out of IOS/IOS-XE
+    'show ip route <ip>' output. Fields are empty when the format isn't recognized."""
+    detail: dict[str, Any] = {"prefix": "", "protocol": "", "distance": "", "metric": "", "next_hops": []}
+    if m := re.search(r"Routing entry for (\S+)", output):
+        detail["prefix"] = m.group(1).rstrip(",")
+    if m := re.search(r'Known via "([^"]+)"(?:, distance (\d+), metric (\d+))?', output):
+        detail["protocol"], detail["distance"], detail["metric"] = m.group(1), m.group(2) or "", m.group(3) or ""
+    for line in output.splitlines():
+        line = line.strip()
+        # "* 10.143.100.1, from 10.143.1.22, 1w0d ago, via TenGigabitEthernet0/1/0"
+        if m := re.match(r"^\*?\s*(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+:[0-9a-fA-F:]*), from \S+,.*?(?:via (\S+))?$", line):
+            detail["next_hops"].append({"next_hop": m.group(1), "interface": m.group(2) or "",
+                                        "active": line.startswith("*")})
+        # "* directly connected, via Vlan110"
+        elif m := re.match(r"^\*?\s*directly connected, via (\S+)", line):
+            detail["next_hops"].append({"next_hop": "connected", "interface": m.group(1), "active": line.startswith("*")})
+    return detail
+
+
 def classify_route(output: str) -> str:
     """Return 'found', 'not found' or 'error' for route lookup output."""
     text = output.strip()
@@ -251,6 +271,27 @@ class CiscoRunner:
         unique = {d["host"]: d for d in devices}
         return sorted(unique.values(), key=lambda d: d["name"])
 
+    def _resolve_route(self, conn: Any, detail: dict[str, Any], vrf: str | None, depth: int = 2) -> dict[str, Any]:
+        """Fill in the outgoing interface for next hops that don't show one (BGP and other recursive
+        routes) by looking up the route to the next hop on the same device, up to `depth` levels."""
+        for hop in detail.get("next_hops", []):
+            nh = hop.get("next_hop")
+            if hop.get("interface") or not nh or nh == "connected" or depth <= 0:
+                continue
+            try:
+                target = parse_route_target(nh)
+            except CiscoError:
+                continue
+            out = conn.send_command(validate_show(route_command("cisco_xe", target, vrf)), read_timeout=self.timeout * 2)
+            if classify_route(out) != "found":
+                continue
+            inner = self._resolve_route(conn, parse_route(out), vrf, depth - 1)
+            first = next((h for h in inner["next_hops"] if h.get("interface")), None)
+            if first:
+                hop["interface"] = first["interface"]
+                hop["resolved_via"] = f"{inner['prefix']} {inner['protocol']} -> {first['next_hop']}"
+        return detail
+
     @staticmethod
     def _collect_ssid(conn: Any, ssid: str, timeout: int) -> str:
         """Gather every piece of config for one SSID on a Catalyst 9800 and return it as text.
@@ -325,6 +366,8 @@ class CiscoRunner:
                     output = self._collect_ssid(conn, arg, self.timeout)
                 else:
                     output = conn.send_command(command, read_timeout=self.timeout * 4, use_textfsm=parse)
+                if command_name == "route" and arg and isinstance(output, str) and classify_route(output) == "found":
+                    result["route_detail"] = self._resolve_route(conn, parse_route(output), vrf)
             if isinstance(output, str):
                 if CONFIG_WORDS.search(command):
                     output = mask_secrets(output)
@@ -461,7 +504,12 @@ def main() -> int:
             print("Summary")
             for r in results:
                 status = "error" if r["error"] and not r.get("route_result") else r.get("route_result", "error")
-                print(f"  {r['device']:<{width}}  {r['host']:<15}  {status:<9}  {r['error'] or ''}")
+                d = r.get("route_detail") or {}
+                hops = "; ".join(f"{h['next_hop']} via {h['interface'] or '?'}"
+                                 + (f" ({h['resolved_via']})" if h.get("resolved_via") else "")
+                                 for h in d.get("next_hops", []))
+                route = f"{d.get('prefix', '')} {d.get('protocol', '')} [{d.get('distance', '')}/{d.get('metric', '')}] {hops}" if d else ""
+                print(f"  {r['device']:<{width}}  {r['host']:<15}  {status:<9}  {route or r['error'] or ''}")
     if route_lookup:
         return 0 if any(r.get("route_result") == "found" for r in results) else 1
     return 1 if any(r["error"] for r in results) else 0

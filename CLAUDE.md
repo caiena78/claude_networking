@@ -47,14 +47,16 @@ Requests like "show me routes for 10.158.8.1", "where is 10.x.x.x routed" or "wh
 python cisco_helper.py route <ip-or-prefix> --json
 ```
 
-With no device options, this runs on every NetBox device tagged `wan_router`. Add `--site <name>`, `-d <device>` or `--vrf <name>` only when the user asks for them. In the JSON, each result's `route_result` is `found`, `not found` or `error`, and `output` holds the router's output.
+With no device options, this runs on every NetBox device tagged `wan_router`. Add `--site <name>`, `-d <device>` or `--vrf <name>` only when the user asks for them. In the JSON, each result's `route_result` is `found`, `not found` or `error`, and `output` holds the router's output. Found routes also have `route_detail`: `prefix`, `protocol`, `distance`, `metric` and `next_hops` (`next_hop`, `interface`, `active`). For recursive routes such as BGP, the helper looks up the route to the next hop on the same router to fill in the real outgoing interface, and records how it got there in `resolved_via` (e.g. `198.18.255.32/32 ospf 500 -> 198.18.0.30`). The text output's Summary shows all of this on one line per router.
+
+To name the devices behind the destination and the next hops, look the IPs up in NetBox: `python netbox_helper.py ip <ip>` (device and interface) and `python netbox_helper.py prefix <ip>` (site, VLAN, VRF).
 
 Then summarize for the user:
 - which routers have the route, and for each one the matched prefix, the next hop, the outgoing interface, the protocol (BGP, OSPF, static, connected and so on) and the AD/metric if shown;
 - whether any router only matched the default route (0.0.0.0/0), and say so explicitly;
 - which routers did not have it, and any errors or skipped devices.
 
-Show the full raw output only if the user asks for it (`--raw` or the default rich output).
+Show the full raw output only if the user asks for it (it is in `output`, or in the text sections above the Summary).
 
 Exit codes: 0 = found on at least one router, 1 = not found anywhere, 2 = setup error (Vault, NetBox or a bad argument).
 
