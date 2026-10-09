@@ -16,6 +16,11 @@ Log in to Vault (once per token lifetime):
     $env:VAULT_ADDR = "https://vault.lcmchealth.org:8200"
     vault login -method=oidc
 
+Log in using a private browser window (use this if the normal login picks the wrong Microsoft account):
+
+    powershell -ExecutionPolicy Bypass -File .\vault_login.ps1     # Windows (Edge InPrivate)
+    chmod +x vault_login.sh && ./vault_login.sh                   # macOS (Chrome incognito)
+
 Sign in as a different account instead:
 
     python vault_list.py --private --prompt login
