@@ -1,6 +1,22 @@
 # claude-network
 
-Looks up how an IP or prefix is routed across the WAN routers. Router credentials and NetBox settings come from HashiCorp Vault, the router list comes from NetBox (devices tagged `wan_router`), and the lookup runs over SSH with netmiko on every router at once.
+Network operations toolkit for LCMC Health. It answers questions about routers, switches, WLCs, sites, IPs and endpoints using NetBox (inventory), the devices themselves over SSH, Catalyst Center, ISE, Meraki and Ordr. All credentials come from HashiCorp Vault.
+
+## Ground rules (read first)
+
+1. **Every task goes through a `*_helper.py` script.** For anything the user asks, use the matching helper. **If the helper can't do what's needed, update the helper first.** Add the command or option, test it read-only, document it in this file, then use it to do the task. Never work around a helper with ad-hoc Python, netmiko or `requests` snippets.
+2. **NetBox is the inventory.** Use `netbox_helper.py` (or `cisco_helper.py`, which resolves devices through NetBox) to find devices, sites, management IPs, roles, models, serials, IP assignments and prefixes. Catalyst Center, ISE, Meraki and Ordr have their own device lists. Use them for their own data (assurance, sessions, Meraki networks, endpoint identity), not as the inventory. If they disagree with NetBox, say so; don't silently prefer them.
+
+```
+python netbox_helper.py sites --name Lake
+python netbox_helper.py devices --site Lakeside [--tag wan_router] [--role wan] [--name wlc]
+python netbox_helper.py device lakeview-wlc-ha01        # full record: site, role, model, serial, platform, primary IP, tags
+python netbox_helper.py ip 10.158.8.21                  # which device and interface has an IP
+python netbox_helper.py prefix 10.158.10.25             # prefixes (site, VLAN, VRF, role) containing an IP
+python netbox_helper.py tags
+```
+
+`--site` accepts a site name, a slug or a unique part of a name. `--json` gives full output.
 
 ## Files
 
@@ -8,7 +24,7 @@ Looks up how an IP or prefix is routed across the WAN routers. Router credential
 |---|---|
 | `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command). Use it for everything run on a device |
 | `vault_helper.py` | Vault login (token from `VAULT_TOKEN`, then `~/.vault-token`, then OIDC browser login), `get_secrets()` (router and NetBox credentials) and `get_secret(key)` (any one key, e.g. `meraki_api`) |
-| `netbox_helper.py` | `get_devices()` returns the tagged devices, plus `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
+| `netbox_helper.py` | **The inventory.** CLI: `sites`, `devices`, `device`, `ip`, `prefix`, `tags`. Also `get_devices()` (used by `cisco_helper.py`) and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `catalyst_helper.py` | Read-only Cisco Catalyst Center (DNA Center) client and CLI (`devices`, `device`, `count`, `interfaces`, `config`, `client`, `sites`, `health`, `device-health`, `issues`, `get <path>`). Use it for all Catalyst Center access |
 | `ise_helper.py` | Read-only Cisco ISE client and CLI for the ERS, MnT and OpenAPI interfaces (`lookup`, `session`, `auth`, `active`, `nad`, `nads`, `groups`, `nodes`, `policy-sets`, `ers`, `mnt`, `api`). Use it for all ISE access |
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |
@@ -321,7 +337,8 @@ Known problem: `claim "samaccountname" not found in token` means the account use
 - Ordr is **read-only**: go through `ordr_helper.py`, which only sends `GET` requests. Never call the Ordr write endpoints (`POST /Rest/SecurityAlarm/StateChange` clears alarms, `POST /Rest/SecurityAlarms/mute` mutes them, and so on for `Vulnerabilities/StateChange`, `UpdateAssetInfo`, `DeviceOnboard`, `UserLocations` and `UserRole`), unless the user explicitly asks for that specific change and confirms it.
 - Never put secrets in `.env`. Do not touch `.env.old`.
 - Only read-only `show` commands on the routers. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state.
-- **No ad-hoc snippets.** Use the helpers (`cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it.
+- **No ad-hoc snippets.** Use the helpers (`netbox_helper.py`, `cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it. See "Ground rules" at the top.
+- **NetBox is the source of truth for inventory.** Look devices up there first.
 - Run show commands on devices only when the user asks for information from them. Keep to the devices the question needs.
 
 ## Adding a platform
