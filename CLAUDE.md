@@ -203,7 +203,7 @@ Command line (start with these):
 
 ```
 python catalyst_helper.py count                              # devices in inventory
-python catalyst_helper.py devices --family Switches --limit 50
+python catalyst_helper.py devices --family "Switches and Hubs" --limit 50   # family must be the exact name
 python catalyst_helper.py devices --hostname "TLS-.*"        # case-sensitive; .* wildcards work
 python catalyst_helper.py devices --reachability Unreachable
 python catalyst_helper.py device tls-wan-rtr-01              # by hostname, management IP, serial or id
