@@ -244,6 +244,9 @@ def main() -> int:
     p_get.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE",
                        help="Query parameter; repeat for more. Use key[]=v for array params")
     p_get.add_argument("--one-page", action="store_true", help="Don't follow pagination")
+    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    for subparser in sub.choices.values():
+        subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args()
 
     m = Meraki(org_id=args.org)

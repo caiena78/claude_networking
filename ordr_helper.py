@@ -292,6 +292,9 @@ def main() -> int:
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE", help="Query parameter; repeat for more")
     p.add_argument("--all", action="store_true", help="Follow MetaData.next pagination")
 
+    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    for subparser in sub.choices.values():
+        subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args()
 
     if args.cmd == "reports":

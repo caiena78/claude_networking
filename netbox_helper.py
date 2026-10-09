@@ -244,6 +244,9 @@ def main() -> int:
     p = sub.add_parser("prefix", help="prefixes containing an IP, or matching a prefix")
     p.add_argument("value")
     sub.add_parser("tags", help="list tags")
+    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    for subparser in sub.choices.values():
+        subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args()
 
     import vault_helper

@@ -367,6 +367,9 @@ def main() -> int:
     p.add_argument("path")
     p = sub.add_parser("api", help="GET any OpenAPI path, e.g. deployment/node")
     p.add_argument("path")
+    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    for subparser in sub.choices.values():
+        subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args()
 
     ise = ISE()
