@@ -148,6 +148,40 @@ class Meraki:
     def lldp_cdp(self, serial: str) -> dict:
         return self.get(f"/devices/{serial}/lldpCdp")
 
+    def ssids(self, network_id: str) -> list[dict]:
+        """The 15 SSID slots of one wireless network (enabled or not)."""
+        return self.get(f"networks/{network_id}/wireless/ssids")
+
+    def ssid_usage(self) -> list[dict]:
+        """Every enabled SSID in every wireless network, with how many APs broadcast it.
+
+        An enabled SSID is on every AP in its network, unless availableOnAllAps is false; then only
+        APs whose tags match one of its availabilityTags broadcast it."""
+        status = {d["serial"]: d.get("status") for d in self.device_statuses(**{"productTypes[]": "wireless"})}
+        aps_by_net: dict[str, list[dict]] = collections.defaultdict(list)
+        for d in self.devices(**{"productTypes[]": "wireless"}):
+            aps_by_net[d.get("networkId")].append(d)
+        rows = []
+        for net in self.networks():
+            if "wireless" not in net.get("productTypes", []):
+                continue
+            aps = aps_by_net.get(net["id"], [])
+            for s in self.ssids(net["id"]):
+                if not s.get("enabled"):
+                    continue
+                if s.get("availableOnAllAps", True):
+                    using = aps
+                else:
+                    wanted = set(s.get("availabilityTags") or [])
+                    using = [a for a in aps if wanted & set(a.get("tags") or [])]
+                rows.append({
+                    "network": net["name"], "networkId": net["id"], "number": s.get("number"), "ssid": s.get("name"),
+                    "authMode": s.get("authMode"), "encryptionMode": s.get("encryptionMode") or s.get("wpaEncryptionMode"),
+                    "visible": s.get("visible", True), "availableOnAllAps": s.get("availableOnAllAps", True),
+                    "aps": len(using), "aps_online": sum(1 for a in using if status.get(a["serial"]) == "online"),
+                })
+        return sorted(rows, key=lambda r: (r["ssid"].lower(), r["network"].lower()))
+
     def sites(self) -> list[dict]:
         """Every network with device counts by product type and how many devices are online."""
         status = {d["serial"]: d.get("status") for d in self.device_statuses()}
@@ -202,6 +236,9 @@ def main() -> int:
     p_dev.add_argument("--network", help="Network name (exact, or a unique substring)")
     p_dev.add_argument("--type", dest="product_type", help="appliance, switch, wireless, camera, cellularGateway...")
     sub.add_parser("offline", help="Devices whose status is not online")
+    p_ssid = sub.add_parser("ssids", help="Enabled SSIDs and how many APs broadcast each")
+    p_ssid.add_argument("--by-network", action="store_true", help="One row per network and SSID instead of totals per SSID")
+    p_ssid.add_argument("--network", help="Only networks whose name contains this text")
     p_get = sub.add_parser("get", help="GET any API path, e.g. organizations/{org}/networks")
     p_get.add_argument("path", help="API path; {org} is replaced with the org ID")
     p_get.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE",
@@ -227,6 +264,24 @@ def main() -> int:
             d["network"] = net_names.get(d.get("networkId"), d.get("networkId"))
         rows.sort(key=lambda d: (d["network"] or "", d.get("name") or ""))
         _print(rows, args.json, ["network", "name", "model", "serial", "status", "lanIp", "publicIp", "lastReportedAt"])
+    elif args.cmd == "ssids":
+        rows = m.ssid_usage()
+        if args.network:
+            rows = [r for r in rows if args.network.lower() in r["network"].lower()]
+        if args.by_network or args.json:
+            _print(rows, args.json, ["ssid", "network", "number", "authMode", "aps", "aps_online", "availableOnAllAps", "visible"])
+        else:
+            totals: dict[str, dict] = {}
+            for r in rows:
+                t = totals.setdefault(r["ssid"], {"ssid": r["ssid"], "networks": 0, "aps": 0, "aps_online": 0, "authModes": set()})
+                t["networks"] += 1
+                t["aps"] += r["aps"]
+                t["aps_online"] += r["aps_online"]
+                t["authModes"].add(r["authMode"] or "")
+            summary = sorted(totals.values(), key=lambda t: (-t["aps"], t["ssid"].lower()))
+            for t in summary:
+                t["authModes"] = ", ".join(sorted(t["authModes"]))
+            _print(summary, False, ["ssid", "networks", "aps", "aps_online", "authModes"])
     elif args.cmd == "get":
         params = dict(kv.split("=", 1) for kv in args.param)
         data = m.get(args.path, **params) if args.one_page else m.get_all(args.path, **params)
