@@ -251,6 +251,32 @@ class ISE:
         rows = rows if isinstance(rows, list) else [rows]
         return rows[:max_items] if max_items else rows
 
+    def session_protocols(self, workers: int = 8) -> dict[str, Any]:
+        """Count active sessions by authentication protocol (EAP-TLS, PEAP, MAB...).
+
+        The active list has no protocol field, so each session's detail is fetched by MAC."""
+        from collections import Counter
+        from concurrent.futures import ThreadPoolExecutor
+
+        sessions = self.active_sessions()
+        macs = [s.get("calling_station_id") for s in sessions if s.get("calling_station_id")]
+
+        def detail(mac: str) -> tuple[str, str]:
+            try:
+                s = self.session(mac) or {}
+            except ISEError:
+                return ("(lookup failed)", "")
+            return (s.get("authentication_protocol") or "(no session detail)", s.get("authentication_method") or "")
+
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            results = list(pool.map(detail, macs))
+        return {
+            "active_sessions": len(sessions),
+            "looked_up": len(macs),
+            "by_protocol": dict(Counter(p for p, _ in results).most_common()),
+            "by_method": dict(Counter(m or "(none)" for _, m in results).most_common()),
+        }
+
     # -- network devices and groups -----------------------------------------
 
     def network_device(self, value: str) -> list[dict]:
@@ -321,6 +347,8 @@ def main() -> int:
     p.add_argument("--records", type=int, default=10, help="Max records (default 10)")
     p = sub.add_parser("active", help="Active sessions")
     p.add_argument("--count", action="store_true", help="Only print the number of active sessions")
+    p.add_argument("--protocols", action="store_true",
+                   help="Count active sessions by auth protocol (EAP-TLS, PEAP...) and method (dot1x, mab)")
     p.add_argument("--limit", type=int, default=50, help="Max sessions to print (default 50; 0 = all)")
     p = sub.add_parser("nad", help="Network device(s) by IP or name substring")
     p.add_argument("value")
@@ -354,6 +382,8 @@ def main() -> int:
     elif args.cmd == "active":
         if args.count:
             print(ise.active_count())
+        elif args.protocols:
+            _print(ise.session_protocols())
         else:
             _print(ise.active_sessions(args.limit or None), args.json,
                    ["user_name", "calling_station_id", "framed_ip_address", "nas_ip_address", "server"])

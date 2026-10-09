@@ -266,6 +266,7 @@ python ise_helper.py lookup 0011.2233.4455            # endpoint record + live s
 python ise_helper.py session 10.158.10.25             # live session by MAC, IP or username
 python ise_helper.py auth 00:11:22:33:44:55 --hours 24   # recent authentications (max 120 h)
 python ise_helper.py active --count                   # number of active sessions
+python ise_helper.py active --protocols               # active sessions by auth protocol (EAP-TLS, PEAP...) and method (dot1x/mab)
 python ise_helper.py active --limit 20                # sample of active sessions
 python ise_helper.py nad 10.158.136.51                # network device by IP, or name substring
 python ise_helper.py nads --name wan                  # list NADs (id, name)
