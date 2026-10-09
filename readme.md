@@ -35,7 +35,7 @@ A token lasts about 32 days, and every helper reuses it from `~/.vault-token`.
 
     vault login -method=oidc
 
-If the browser signs in with the wrong Microsoft account (for example a Sapphire account, which fails with `claim "samaccountname" not found`), log in from a private window instead:
+If the browser signs in with the wrong Microsoft account (for example a xyzcorp account, which fails with `claim "samaccountname" not found`), log in from a private window instead:
 
     powershell -ExecutionPolicy Bypass -File .\vault_login.ps1     # Windows (Edge InPrivate)
     chmod +x vault_login.sh && ./vault_login.sh                   # macOS (Chrome incognito)
