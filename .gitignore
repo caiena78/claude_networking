@@ -27,3 +27,7 @@ Thumbs.db
 
 # Local-only scripts (internal addresses)
 /set_vault_addr.ps1
+
+# Packet capture output and sessions (packet data)
+captures/
+ftd_interfaces.json
