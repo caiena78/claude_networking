@@ -15,6 +15,8 @@ Usage:
     python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01
     python cisco_helper.py route 10.158.10.1                      # route lookup on every wan_router device
     python cisco_helper.py route 10.158.8.0/24 --site Lakeside --vrf CORP
+    python cisco_helper.py locate 10.158.0.139                    # trace an IP to its access switchport
+    python cisco_helper.py locate ac:b4:80:b9:a0:1f -d lv-mdf-core-9500(1)   # trace a MAC from a starting device
     python cisco_helper.py list                         # list the built-in commands
 
 As a module:
@@ -25,6 +27,7 @@ As a module:
 
 Exit codes: 0 = every device answered, 1 = at least one device failed, 2 = setup error.
 For `route <ip>`: 0 = at least one device has the route, 1 = none has it, 2 = setup error.
+For `locate`: 0 = switchport found, 1 = not found, 2 = setup error.
 """
 
 from __future__ import annotations
@@ -110,6 +113,19 @@ ROUTE_FOUND = re.compile(r"Routing entry for|\bvia\b|directly connected|\bubest/
 ROUTE_ERROR = re.compile(r"% ?Invalid input|syntax error|% ?Incomplete command|% ?Ambiguous command", re.I)
 
 
+# Sites whose core switches route user subnets in a VRF (NetBox site name -> VRF). Only the cores (NetBox role
+# "Core") have it; the WAN routers there use the global table. Route and ARP lookups on these cores use this
+# VRF only, unless --vrf says otherwise.
+CORE_VRFS = {"Lakeview Hospital": "buyer", "Lakeside": "buyer", "Tulane": "buyer"}
+
+
+def default_vrf(device: dict[str, Any]) -> str | None:
+    """The VRF to use for route/ARP lookups on a device when none was given (see CORE_VRFS)."""
+    if (device.get("role") or "").lower() == "core":
+        return CORE_VRFS.get(device.get("site") or "")
+    return None
+
+
 class CiscoError(Exception):
     """Bad command or target (never contains credentials)."""
 
@@ -156,8 +172,9 @@ def parse_route(output: str) -> dict[str, Any]:
         detail["protocol"], detail["distance"], detail["metric"] = m.group(1), m.group(2) or "", m.group(3) or ""
     for line in output.splitlines():
         line = line.strip()
-        # "* 10.143.100.1, from 10.143.1.22, 1w0d ago, via TenGigabitEthernet0/1/0"
-        if m := re.match(r"^\*?\s*(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+:[0-9a-fA-F:]*), from \S+,.*?(?:via (\S+))?$", line):
+        # "* 10.143.100.1, from 10.143.1.22, 1w0d ago, via TenGigabitEthernet0/1/0"; static: "* 10.75.71.84"
+        # or "* 10.75.71.84, via Vlan10"
+        if m := re.match(r"^\*?\s*(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+:[0-9a-fA-F:]*)(?:, from \S+,.*?)?(?:,? ?via (\S+))?$", line):
             detail["next_hops"].append({"next_hop": m.group(1), "interface": m.group(2) or "",
                                         "active": line.startswith("*")})
         # "* directly connected, via Vlan110"
@@ -215,6 +232,111 @@ def build_command(name: str, device_type: str, arg: str | None = None) -> str:
         with_arg, without_arg = template.split("||")
         template = with_arg if arg else without_arg
     return validate_show(template.format(arg=arg or ""))
+
+
+# ---------------------------------------------------------------------------
+# IP -> switchport trace (locate): parsers for ARP, MAC table, port-channel and CDP output
+# ---------------------------------------------------------------------------
+
+CISCO_MAC = r"[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}"
+# MAC table "ports" that aren't real ports.
+NOT_A_PORT = re.compile(r"^(CPU|Router|Switch|Drop|sup-eth\d*|vPC Peer-Link|Sup)$", re.I)
+
+
+def parse_mac(text: str) -> str | None:
+    """aabb.ccdd.eeff for a MAC in any common format (aa:bb:.., aa-bb-.., aabb.ccdd.eeff), else None."""
+    if not re.fullmatch(r"[0-9a-fA-F:.\-]{12,17}", text.strip()):
+        return None
+    hexes = re.sub(r"[^0-9a-fA-F]", "", text).lower()
+    return f"{hexes[0:4]}.{hexes[4:8]}.{hexes[8:12]}" if len(hexes) == 12 else None
+
+
+def mac_formats(cisco_mac: str) -> dict[str, str]:
+    """aabb.ccdd.eeff -> {'cisco': ..., 'colon': 'aa:bb:cc:dd:ee:ff'}."""
+    hexes = re.sub(r"[^0-9a-f]", "", cisco_mac.lower())
+    return {"cisco": cisco_mac.lower(), "colon": ":".join(hexes[i:i + 2] for i in range(0, 12, 2))}
+
+
+def parse_arp(output: str, ip: str) -> dict[str, str] | None:
+    """MAC and interface for an IP from 'show ip arp <ip>' (IOS / IOS-XE / NX-OS)."""
+    for line in output.splitlines():
+        if not re.search(rf"(^|\s){re.escape(ip)}(\s|$)", line):
+            continue
+        mac = re.search(CISCO_MAC, line)
+        if mac:
+            return {"mac": mac.group(0).lower(), "interface": line.split()[-1]}
+    return None
+
+
+def parse_mac_table(output: str, mac: str) -> list[dict[str, str]]:
+    """[{vlan, port, type}] for a MAC from 'show mac address-table address <mac>'."""
+    rows = []
+    for line in output.splitlines():
+        if mac.lower() not in line.lower():
+            continue
+        tokens = line.replace("*", " ").split()
+        vlan = next((t for t in tokens if t.isdigit()), "")
+        port = tokens[-1] if tokens else ""
+        kind = next((t for t in tokens if t.lower() in ("dynamic", "static", "secure")), "")
+        if port and not NOT_A_PORT.match(port) and not re.fullmatch(CISCO_MAC, port):
+            rows.append({"vlan": vlan, "port": port, "type": kind.lower()})
+    return rows
+
+
+def parse_port_channel_members(output: str, port_channel: str) -> list[str]:
+    """Member ports (bundled first) of a port-channel from 'show etherchannel / port-channel summary'."""
+    number = re.sub(r"\D", "", port_channel)
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if re.search(rf"\bPo{number}\(", line):
+            # Members can wrap onto the next lines; collect until the next group number.
+            text = line
+            for nxt in lines[i + 1:]:
+                if re.match(r"^\s*\d+\s+Po\d+", nxt) or not nxt.strip():
+                    break
+                text += " " + nxt
+            members = re.findall(r"(\S+?)\((\w+)\)", text.split(f"Po{number}(", 1)[1])
+            bundled = [m for m, flag in members if flag in ("P", "p", "bndl")]
+            return bundled or [m for m, _ in members]
+    return []
+
+
+def parse_cdp_detail(output: str) -> list[dict[str, str]]:
+    """Neighbors from 'show cdp neighbors <port> detail': device_id, ip, platform, capabilities, port, remote_port."""
+    neighbors = []
+    for block in re.split(r"^-{5,}\s*$", output, flags=re.M):
+        dev = re.search(r"Device ID:\s*(\S+)", block)
+        if not dev:
+            continue
+        ip = re.search(r"(?:IP address|IPv4 Address):\s*(\d+\.\d+\.\d+\.\d+)", block)
+        plat = re.search(r"Platform:\s*([^,\n]+)", block)
+        caps = re.search(r"Capabilities:\s*([^\n]+)", block)
+        intf = re.search(r"Interface:\s*([^,\n]+),\s*Port ID \(outgoing port\):\s*(\S+)", block)
+        neighbors.append({
+            "device_id": dev.group(1), "ip": ip.group(1) if ip else "",
+            "platform": plat.group(1).strip() if plat else "", "capabilities": caps.group(1).strip() if caps else "",
+            "port": intf.group(1).strip() if intf else "", "remote_port": intf.group(2) if intf else "",
+        })
+    return neighbors
+
+
+def cdp_neighbor_kind(neighbor: dict[str, str]) -> str:
+    """'switch' for a Cisco switch/router we can follow, 'meraki', 'ap', 'phone', or 'other'."""
+    plat, caps = neighbor["platform"].lower(), neighbor["capabilities"].lower()
+    if "meraki" in plat or plat.startswith(("ms", "mr", "mx")):
+        return "meraki"
+    if "phone" in caps or "phone" in plat:
+        return "phone"
+    if "trans-bridge" in caps or re.search(r"\bair-|\bap\b|c91\d\dax|cw91\d\d", plat):
+        return "ap"
+    if "switch" in caps or "router" in caps:
+        return "switch"
+    return "other"
+
+
+def parent_interface(name: str) -> str:
+    """GigabitEthernet0/0/1.110 -> GigabitEthernet0/0/1."""
+    return name.split(".")[0]
 
 
 def is_ip(value: str) -> bool:
@@ -333,9 +455,26 @@ class CiscoRunner:
             parts.append((f"show wlan name {profile}", show(f"show wlan name {profile}")))
         return "\n\n".join(f"== {title}\n{body}" for title, body in parts)
 
+    def connect(self, device: dict[str, Any]) -> Any:
+        """Open an SSH session to a device (in enable mode when possible). Use it as a context manager."""
+        from netmiko import ConnectHandler
+
+        conn = ConnectHandler(
+            device_type=device["device_type"], host=device["host"],
+            username=self.creds["ansible_user"], password=self.creds["ansible_password"],
+            secret=self.creds["ansible_become_password"],
+            conn_timeout=self.timeout, auth_timeout=self.timeout, banner_timeout=self.timeout,
+        )
+        if device["device_type"] in ("cisco_ios", "cisco_xe"):
+            try:
+                if not conn.check_enable_mode():
+                    conn.enable()
+            except Exception:  # noqa: BLE001 - most show commands work unprivileged
+                pass
+        return conn
+
     def _run_one(self, device: dict[str, Any], command_name: str | None, raw_command: str | None,
                  arg: str | None, lines: int | None, parse: bool, vrf: str | None = None) -> dict[str, Any]:
-        from netmiko import ConnectHandler
         from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
         result: dict[str, Any] = {"device": device["name"], "host": device["host"], "site": device.get("site", ""),
@@ -346,22 +485,13 @@ class CiscoRunner:
                     raise CiscoError("'ssid' needs an SSID name")
                 command = f"ssid {arg} (show wlan summary, running-config sections, show wlan name)"
             elif command_name == "route" and arg:
+                vrf = vrf or default_vrf(device)
+                result["vrf"] = vrf or ""
                 command = validate_show(route_command(device["device_type"], parse_route_target(arg), vrf))
             else:
                 command = validate_show(raw_command) if raw_command else build_command(command_name, device["device_type"], arg)
             result["command"] = command
-            with ConnectHandler(
-                device_type=device["device_type"], host=device["host"],
-                username=self.creds["ansible_user"], password=self.creds["ansible_password"],
-                secret=self.creds["ansible_become_password"],
-                conn_timeout=self.timeout, auth_timeout=self.timeout, banner_timeout=self.timeout,
-            ) as conn:
-                if device["device_type"] in ("cisco_ios", "cisco_xe"):
-                    try:
-                        if not conn.check_enable_mode():
-                            conn.enable()
-                    except Exception:  # noqa: BLE001 - most show commands work unprivileged
-                        pass
+            with self.connect(device) as conn:
                 if command_name == "ssid":
                     output = self._collect_ssid(conn, arg, self.timeout)
                 else:
@@ -405,6 +535,317 @@ class CiscoRunner:
             results = [f.result() for f in as_completed(futures)]
         return sorted(results, key=lambda r: r["device"])
 
+    # -- locate: IP -> gateway -> MAC -> access switchport ---------------------------
+
+    def _device_for(self, name_or_ip: str, hint_ip: str = "") -> dict[str, Any]:
+        """A device dict for a CDP device ID or next-hop IP: NetBox by name, then by IP assignment, else the IP."""
+        import netbox_helper
+
+        if not is_ip(name_or_ip):
+            short = name_or_ip.split(".")[0].split("(")[0]
+            found, _ = netbox_helper.get_devices(self.nb, tag=None, name_contains=short)
+            exact = [d for d in found if d["name"].lower() in (short.lower(), name_or_ip.lower())]
+            if exact:
+                return exact[0]
+            name_or_ip = hint_ip
+        if name_or_ip:
+            for row in netbox_helper.ip_lookup(self.nb, name_or_ip):
+                if row["device"]:
+                    found, _ = netbox_helper.get_devices(self.nb, tag=None, name_contains=row["device"])
+                    exact = [d for d in found if d["name"].lower() == row["device"].lower()]
+                    if exact:
+                        return {**exact[0], "host": exact[0]["host"]}
+            return {"name": name_or_ip, "host": name_or_ip, "device_type": "cisco_ios", "site": "", "platform": None}
+        raise CiscoError("no name or IP to connect to")
+
+    def locate(self, ip: str, vrf: str | None = None, start: list[dict[str, Any]] | None = None,
+               max_hops: int = 8, log=None) -> dict[str, Any]:
+        """Find the switchport where an IP lives.
+
+        1. NetBox: the prefix (site, VLAN) and any device the IP is assigned to.
+        2. Route lookup on the wan_router devices (at the prefix's site when it has some, else all),
+           following next hops router by router until one has the subnet directly connected (the gateway).
+        3. 'show ip arp <ip>' on the gateway for the MAC.
+        4. 'show mac address-table address <mac>' switch by switch, following the port's CDP neighbor
+           ('show cdp neighbors <port> detail') while it is another Cisco switch, until the access port.
+        Only show commands are sent. Returns a dict with every step in 'path'."""
+        import netbox_helper
+
+        log = log or (lambda msg: None)
+        target = parse_route_target(ip)
+        result: dict[str, Any] = {"ip": ip, "netbox_prefix": [], "netbox_ip": [], "route_path": [], "gateway": None,
+                                  "mac": None, "path": [], "location": None, "notes": []}
+        result["netbox_prefix"] = netbox_helper.prefix_lookup(self.nb, ip)
+        result["netbox_ip"] = netbox_helper.ip_lookup(self.nb, ip)
+        site = next((p["site"] for p in result["netbox_prefix"] if p["site"]), "")
+
+        # Step 2: where is the subnet connected?
+        candidates = start
+        if not candidates and site:
+            try:
+                candidates = self.resolve(site=site, tag="wan_router")
+                if candidates:
+                    log(f"NetBox: {ip} is in {result['netbox_prefix'][0]['prefix']} at site {site}")
+            except (CiscoError, ValueError):
+                candidates = None
+        site_scoped = bool(candidates) and not start
+        if not candidates:
+            candidates = self.resolve(tag="wan_router")
+        looked: dict[str, dict[str, Any]] = {}  # host -> route step, so each device is asked once
+
+        def lookup(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            new = [d for d in devices if d["host"] not in looked]
+            if new:
+                log(f"route lookup for {ip} on {', '.join(d['name'] for d in new)}")
+                for r in self.run(new, "route", ip, vrf=vrf):
+                    dev = next(d for d in new if d["host"] == r["host"])
+                    detail = r.get("route_detail") or {}
+                    step = {"device": r["device"], "host": r["host"], "vrf": r.get("vrf") or "",
+                            "result": r.get("route_result") or "error", "error": r["error"],
+                            "prefix": detail.get("prefix", ""), "protocol": detail.get("protocol", ""),
+                            "next_hops": detail.get("next_hops", []), "_device": dev}
+                    looked[r["host"]] = step
+                    result["route_path"].append(step)
+            return [looked[d["host"]] for d in devices]
+
+        def connected(step: dict[str, Any]) -> bool:
+            return step["result"] == "found" and any(h["next_hop"] == "connected" for h in step["next_hops"])
+
+        def specific(step: dict[str, Any]) -> bool:
+            return step["result"] == "found" and bool(step["prefix"]) and not step["prefix"].startswith("0.0.0.0/0")
+
+        def best(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+            usable = [s for s in steps if specific(s)]
+            return max(usable, key=lambda s: int(s["prefix"].split("/")[1]) if "/" in s["prefix"] else 0) if usable else None
+
+        steps = lookup(candidates)
+        if site_scoped and not any(specific(s) for s in steps):
+            # NetBox's site for the prefix may be wrong or stale: ask every WAN router instead.
+            result["notes"].append(f"the wan_routers at NetBox site {site!r} have no specific route to {ip}; "
+                                   "asked every wan_router (NetBox's site for this prefix may be wrong)")
+            steps = lookup(self.resolve(tag="wan_router"))
+
+        gateways: list[dict[str, Any]] = []
+        current = next((s for s in steps if connected(s)), None) or best(steps)
+        if not current:
+            result["notes"].append("no router had a specific route to the subnet (only the default route, or none)")
+        for _ in range(8):  # follow next hops router by router
+            if not current:
+                break
+            if connected(current):
+                gw_if = next(h["interface"] for h in current["next_hops"] if h["next_hop"] == "connected")
+                gateways.append({**current["_device"], "interface": gw_if, "prefix": current["prefix"],
+                                 "vrf": current["vrf"]})
+                break
+            nh = next((h for h in current["next_hops"] if h.get("active")), None) or \
+                (current["next_hops"][0] if current["next_hops"] else None)
+            if not nh or not is_ip(nh["next_hop"]):
+                result["notes"].append(f"{current['device']} has no usable next hop for {ip}")
+                break
+            nxt_dev = self._device_for(nh["next_hop"], nh["next_hop"])
+            log(f"{current['device']}: {ip} via {nh['next_hop']} ({nh.get('interface') or '?'}) -> {nxt_dev['name']}")
+            nxt = lookup([nxt_dev])[0]
+            if nxt["result"] == "error":
+                result["notes"].append(
+                    f"next hop {nh['next_hop']} ({nxt_dev['name']}) did not answer ({nxt['error']}); it is probably a "
+                    "firewall or a non-Cisco device with the subnet behind it. Get the host's MAC from Ordr or ISE and "
+                    f"run 'cisco_helper.py locate <mac> -d {current['device']}' to trace it at layer 2.")
+                break
+            if not specific(nxt):
+                result["notes"].append(f"{nxt['device']} has no specific route to {ip} "
+                                       f"({'VRF ' + nxt['vrf'] if nxt['vrf'] else 'global table'})")
+                break
+            current = nxt
+        if not gateways:
+            if "meraki" in site.lower():
+                result["notes"].append(f"NetBox puts this prefix at site {site!r}: it is behind a Meraki MX. "
+                                       f"Use 'meraki_helper.py client {ip}' (add --network to make it faster).")
+            result["notes"].append("did not find a router with the subnet directly connected. If the IP is in a "
+                                   "Meraki network, try meraki_helper.py client <ip>.")
+            for s in result["route_path"]:
+                s.pop("_device", None)
+            return result
+        for s in result["route_path"]:
+            s.pop("_device", None)
+
+        # Step 3: ARP on the gateway(s); HSRP pairs both have the subnet connected, so try each.
+        arp = None
+        for gw in gateways:
+            gw_vrf = vrf or gw.get("vrf") or default_vrf(gw)
+            command = validate_show(f"show ip arp {'vrf ' + gw_vrf + ' ' if gw_vrf else ''}{ip}")
+            try:
+                with self.connect(gw) as conn:
+                    out = conn.send_command(command, read_timeout=self.timeout * 2)
+            except Exception as exc:  # noqa: BLE001 - try the other gateway
+                result["notes"].append(f"could not reach gateway {gw['name']}: {type(exc).__name__}")
+                continue
+            arp = parse_arp(out, ip)
+            log(f"{gw['name']}: {command} -> {arp['mac'] + ' on ' + arp['interface'] if arp else 'no entry'}")
+            if arp:
+                result["gateway"] = {"device": gw["name"], "host": gw["host"], "interface": gw["interface"],
+                                     "prefix": gw["prefix"], "arp_interface": arp["interface"]}
+                break
+        if not arp:
+            result["gateway"] = {"device": gateways[0]["name"], "host": gateways[0]["host"],
+                                 "interface": gateways[0]["interface"], "prefix": gateways[0]["prefix"]}
+            result["notes"].append("no ARP entry on the gateway: the host is probably offline or silent")
+            return result
+        mac = arp["mac"]
+        result["mac"] = mac_formats(mac)
+        gw = next(g for g in gateways if g["name"] == result["gateway"]["device"])
+
+        return self.trace_mac(mac, gw, result, arp["interface"], max_hops, log)
+
+    def trace_mac(self, mac: str, device: dict[str, Any], result: dict[str, Any] | None = None, arp_if: str = "",
+                  max_hops: int = 8, log=None) -> dict[str, Any]:
+        """Follow a MAC from a device down to its access port: MAC table, then the port's CDP neighbor while it
+        is another Cisco switch. arp_if is the gateway's ARP interface (used when it is a routed interface)."""
+        log = log or (lambda msg: None)
+        mac = mac_formats(mac)["cisco"]
+        if result is None:
+            result = {"ip": None, "netbox_prefix": [], "netbox_ip": [], "route_path": [], "gateway": None,
+                      "mac": mac_formats(mac), "path": [], "location": None, "notes": []}
+        gw = device
+        seen: set[str] = set()
+        for _ in range(max_hops):
+            if device["host"] in seen:
+                result["notes"].append(f"loop detected at {device['name']}")
+                break
+            seen.add(device["host"])
+            hop: dict[str, Any] = {"device": device["name"], "host": device["host"], "port": "", "vlan": "",
+                                   "neighbor": None, "error": None}
+            result["path"].append(hop)
+            try:
+                with self.connect(device) as conn:
+                    def show(cmd: str) -> str:
+                        return conn.send_command(validate_show(cmd), read_timeout=self.timeout * 2)
+
+                    rows = parse_mac_table(show(f"show mac address-table address {mac}"), mac)
+                    if rows:
+                        hop["port"], hop["vlan"] = rows[0]["port"], rows[0]["vlan"]
+                    elif device is gw and arp_if and not arp_if.lower().startswith("vlan"):
+                        hop["port"] = parent_interface(arp_if)  # routed (sub)interface: the L2 next is its neighbor
+                    else:
+                        hop["error"] = "MAC not in this device's MAC address table"
+                        if device is gw and arp_if:
+                            result["notes"].append("the gateway has an ARP entry but the MAC has aged out of the MAC "
+                                                   "table (the host has been idle); try again once it sends traffic")
+                        break
+                    port = hop["port"]
+                    if re.match(r"^(Po|Port-channel)", port, re.I):
+                        summary = show("show port-channel summary" if device["device_type"] == "cisco_nxos"
+                                       else "show etherchannel summary")
+                        members = parse_port_channel_members(summary, port)
+                        hop["port_channel_members"] = members
+                        port = members[0] if members else port
+                    cdp_cmd = (f"show cdp neighbors interface {port} detail" if device["device_type"] == "cisco_nxos"
+                               else f"show cdp neighbors {port} detail")
+                    neighbors = parse_cdp_detail(show(cdp_cmd))
+                    switch = next((n for n in neighbors if cdp_neighbor_kind(n) == "switch"), None)
+                    other = next((n for n in neighbors if cdp_neighbor_kind(n) != "switch"), None)
+                    log(f"{device['name']}: {mac} on {hop['port']} vlan {hop['vlan'] or '?'}"
+                        + (f" -> CDP {(switch or other)['device_id']} ({(switch or other)['platform']})" if (switch or other) else ""))
+                    if switch:
+                        hop["neighbor"] = {**switch, "kind": "switch"}
+                        device = self._device_for(switch["device_id"], switch["ip"])
+                        continue
+                    # Access port: record port status and whatever is attached (phone, AP, Meraki switch).
+                    hop["neighbor"] = {**other, "kind": cdp_neighbor_kind(other)} if other else None
+                    status = show(f"show interfaces {hop['port']} status")
+                    hop["port_status"] = next((l.strip() for l in status.splitlines()
+                                               if l.strip() and not l.lstrip().startswith(("Port", "-"))), "")
+                    result["location"] = {"switch": device["name"], "host": device["host"], "port": hop["port"],
+                                          "vlan": hop["vlan"], "port_status": hop["port_status"],
+                                          "attached": hop["neighbor"]}
+                    kind = (hop["neighbor"] or {}).get("kind")
+                    if kind == "phone":
+                        result["notes"].append("the host is behind an IP phone on this port")
+                    elif kind == "ap":
+                        result["notes"].append("this port goes to an access point: the host is a wireless client "
+                                               "(check catalyst_helper.py client <mac> or ise_helper.py auth <mac>)")
+                    elif kind == "meraki":
+                        result["notes"].append("this port goes to a Meraki device: continue with "
+                                               "meraki_helper.py client <mac>")
+                    break
+            except Exception as exc:  # noqa: BLE001 - report where the trace stopped
+                hop["error"] = f"could not connect or run commands: {type(exc).__name__}"
+                break
+        else:
+            result["notes"].append(f"stopped after {max_hops} switches")
+        return result
+
+
+def format_locate(r: dict[str, Any]) -> str:
+    """Human-readable summary of a locate() result."""
+    lines = [f"Locate {r['ip'] or r['mac']['colon']}"]
+    for p in r["netbox_prefix"][:1]:
+        lines.append(f"  NetBox prefix   {p['prefix']}  site {p['site'] or '?'}  vlan {p['vlan'] or '?'}  vrf {p['vrf'] or 'global'}"
+                     + (f"  ({p['description']})" if p["description"] else ""))
+    for a in r["netbox_ip"]:
+        lines.append(f"  NetBox IP       {a['address']} assigned to {a['device'] or '?'} {a['interface']}  {a['dns_name']}".rstrip())
+    for step in r["route_path"]:
+        hops = "; ".join(f"{h['next_hop']} via {h.get('interface') or '?'}" for h in step["next_hops"])
+        vrf_label = f"[vrf {step['vrf']}] " if step.get("vrf") else ""
+        lines.append(f"  route           {step['device']:<22} {step['result']:<9} {vrf_label}{step['prefix']} {step['protocol']} {hops}"
+                     .rstrip() + (f"  {step['error']}" if step["error"] and step["result"] != "found" else ""))
+    if r["gateway"]:
+        g = r["gateway"]
+        lines.append(f"  gateway         {g['device']} ({g['host']}) {g['interface']}  {g['prefix']}")
+    if r["mac"]:
+        lines.append(f"  MAC             {r['mac']['cisco']}  ({r['mac']['colon']})")
+    for hop in r["path"]:
+        n = hop.get("neighbor")
+        via = f" -> {n['device_id']} {n['remote_port']} [{n['kind']}: {n['platform']}]" if n else ""
+        members = f" ({', '.join(hop['port_channel_members'])})" if hop.get("port_channel_members") else ""
+        lines.append(f"  L2 hop          {hop['device']:<22} port {hop['port'] or '?'}{members} vlan {hop['vlan'] or '?'}{via}"
+                     + (f"  ERROR: {hop['error']}" if hop["error"] else ""))
+    loc = r["location"]
+    if loc:
+        lines.append(f"  LOCATION        {loc['switch']} ({loc['host']}) port {loc['port']} vlan {loc['vlan'] or '?'}")
+        if loc.get("port_status"):
+            lines.append(f"  port status     {loc['port_status']}")
+    else:
+        lines.append("  LOCATION        not found")
+    for note in r["notes"]:
+        lines.append(f"  note            {note}")
+    return "\n".join(lines)
+
+
+def locate_main(args: argparse.Namespace) -> int:
+    """CLI for 'locate <ip|mac>'. Exit 0 = switchport found, 1 = not found, 2 = setup error."""
+    mac = parse_mac(args.arg or "")
+    if not args.arg or not (is_ip(args.arg) or mac):
+        print("usage: cisco_helper.py locate <ip> [-d <first router>] [--vrf NAME]\n"
+              "       cisco_helper.py locate <mac> -d <router or switch to start from>", file=sys.stderr)
+        return 2
+
+    def log(msg: str) -> None:
+        print(f"... {msg}", file=sys.stderr)
+
+    try:
+        runner = CiscoRunner(timeout=args.timeout, workers=args.workers)
+        start = runner.resolve(args.device, args.site, args.tag, args.name, args.device_type) \
+            if (args.device or args.site or args.tag or args.name) else None
+        if mac:
+            if not start or len(start) != 1:
+                raise CiscoError("locate <mac> needs exactly one starting device (-d), e.g. the gateway or core switch")
+            result = runner.trace_mac(mac, start[0], log=log)
+        else:
+            result = runner.locate(args.arg, vrf=args.vrf, start=start, log=log)
+    except (CiscoError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - Vault / NetBox problems
+        print(f"setup error: {type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}", file=sys.stderr)
+        return 2
+    text = json.dumps(result, indent=2, default=str) if args.json else format_locate(result)
+    print(text)
+    if args.output:
+        with open(args.output, "a" if args.append else "w", encoding="utf-8") as fh:
+            fh.write(text.rstrip() + "\n\n")
+        print(f"{'Appended to' if args.append else 'Wrote'} {args.output}", file=sys.stderr)
+    return 0 if result["location"] else 1
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -433,7 +874,12 @@ def main() -> int:
             usage = f"{name} <arg>" if arg_mode == "required" else (f"{name} [arg]" if arg_mode == "optional" else name)
             print(f"{usage:22} {help_text}")
         print(f"{'show \"<command>\"':22} any single read-only show command")
+        print(f"{'locate <ip|mac>':22} trace an IP to its switchport: NetBox prefix, wan_router routes, gateway ARP, "
+              "MAC table and CDP hop by hop (a MAC needs -d <start device>)")
         return 0
+
+    if args.command == "locate":
+        return locate_main(args)
 
     raw_command = None
     if args.command == "show":

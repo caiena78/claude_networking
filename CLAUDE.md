@@ -18,17 +18,67 @@ python netbox_helper.py tags
 
 `--site` accepts a site name, a slug or a unique part of a name. `--json` gives full output.
 
+3. **Look devices up in the order below** (see "Finding a device").
+
+## Finding a device
+
+Pick the path by what the user gives you and what kind of device it is.
+
+**A Cisco network device** (router, switch, WLC, core, WAN router), by name, IP, site or role: **use NetBox.**
+
+```
+python netbox_helper.py device <name>          # or: devices --site X --role Core, ip <mgmt-ip>
+```
+
+Use Catalyst Center or Meraki for a Cisco device only for their own data (health, assurance, Meraki status), not to find it.
+
+**A non-Cisco device or endpoint** (PC, printer, phone, medical or IoT device, server), by MAC, name or IP. Try the helpers **in this order**, and stop at the first one that knows the device. Use the later ones only for what the first can't tell you:
+
+1. **Ordr**: what the device is (group, profile, maker, model, OS, risk) and where Ordr last saw it.
+   `python ordr_helper.py device <mac|ip|name> [--include connectivity-info]`
+2. **ISE**: whether and how it authenticates, its live session, and the switch/port or WLC it authenticated through.
+   `python ise_helper.py lookup <mac>`, `python ise_helper.py session <mac|ip>`, `python ise_helper.py auth <mac>`
+3. **Catalyst Center**: assurance data on where it is connected (AP or switch and interface, SSID, VLAN, health).
+   `python catalyst_helper.py client <mac>`
+
+If none of them has it, or the IP is in a Meraki site (NetBox prefix site `Cisco Meraki`, or the `PUC_*`, `LRPG *`, `CHMPC *` and `CC_*` networks), use `python meraki_helper.py client <mac|ip>`.
+
+**Finding the switchport for an IP** ("where is 10.x.x.x plugged in", "what port is this IP on"): trace it through the network with `cisco_helper.py locate`:
+
+```
+python cisco_helper.py locate <ip>                         # full trace; --json for every step
+python cisco_helper.py locate <mac> -d <router or switch>  # MAC trace from a starting device (e.g. the core)
+```
+
+`locate` does what you would do by hand, using only `show` commands:
+
+1. **NetBox** `prefix <ip>`: the subnet, its site, VLAN and VRF. `ip <ip>`: whether the IP is assigned to a device.
+2. **Route lookup on the `wan_router` devices** at that site (or on every `wan_router` if the site has none, or none of them has a specific route, because NetBox's site can be stale). Then follow the next hop router by router, finding each next hop's device in NetBox, until a device has the subnet **directly connected**. That device is the gateway, usually the site core.
+3. **`show ip arp <ip>`** on the gateway gives the MAC and the SVI.
+4. **`show mac address-table address <mac>`** gives the port. If the port is a port-channel, the helper finds its members (`show etherchannel summary`). **`show cdp neighbors <port> detail`** shows what is on that port. If it is another Cisco switch, the helper connects to it (looked up by name in NetBox, else by its CDP IP) and repeats. The trace stops at the first port with no switch behind it, the access port, and shows it with `show interfaces <port> status`.
+
+It reports the gateway, the MAC (Cisco and colon formats), each L2 hop and the final switch, port, VLAN and port status. Its notes cover the cases where the trace stops early:
+- **IP phone** on the port: the host is behind the phone.
+- **AP** on the port: the host is a wireless client. Use ISE `auth <mac>` or Catalyst `client <mac>`.
+- **Meraki** device: continue with `meraki_helper.py client <mac>`.
+- A next hop that doesn't answer SSH (a firewall or a non-Cisco device): get the MAC from Ordr or ISE, then run `locate <mac> -d <last router>`.
+- An ARP entry with no MAC-table entry: the host has been idle, so try again later.
+
+Then take the MAC to Ordr or ISE to say what the device is. Exit codes: 0 = switchport found, 1 = not found, 2 = setup error.
+
+**VRFs on the cores:** at **Lakeview Hospital, Lakeside and Tulane**, user and server subnets live in VRF **`buyer`**, and **only on the core switches** (NetBox role `Core`, e.g. `lv-mdf-core-9500(1)`, `ls-mdf-core-9500(1)`, `tul-mdf-core-9606(1)`). The WAN routers at those sites use the global table. `cisco_helper.py` handles this for you (`CORE_VRFS` in the code): route and ARP lookups on those cores use VRF `buyer` only and skip every other VRF, unless you pass `--vrf`. In the global table those cores show other routes, such as a static route to a firewall for the server VLAN, and those routes are wrong for this purpose. To add a site, add it to `CORE_VRFS`.
+
 ## Files
 
 | File | Role |
 |---|---|
-| `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command). Use it for everything run on a device |
+| `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command), plus `locate <ip\|mac>` (traces an IP to its switchport). Use it for everything run on a device |
 | `vault_helper.py` | Vault login (token from `VAULT_TOKEN`, then `~/.vault-token`, then OIDC browser login), `get_secrets()` (router and NetBox credentials) and `get_secret(key)` (any one key, e.g. `meraki_api`) |
 | `netbox_helper.py` | **The inventory.** CLI: `sites`, `devices`, `device`, `ip`, `prefix`, `tags`. Also `get_devices()` (used by `cisco_helper.py`) and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `catalyst_helper.py` | Read-only Cisco Catalyst Center (DNA Center) client and CLI (`devices`, `device`, `count`, `interfaces`, `config`, `client`, `sites`, `health`, `device-health`, `issues`, `get <path>`). Use it for all Catalyst Center access |
 | `ise_helper.py` | Read-only Cisco ISE client and CLI for the ERS, MnT and OpenAPI interfaces (`lookup`, `session`, `auth`, `active`, `nad`, `nads`, `groups`, `nodes`, `policy-sets`, `ers`, `mnt`, `api`). Use it for all ISE access |
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |
-| `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI (`sites`, `devices`, `offline`, `get <path>`). Use it for all Meraki access |
+| `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI: inventory (`sites`, `devices`, `aps`, `device`, `inventory`, `licenses`, `firmware`), clients (`clients`, `client`, `top`), wireless (`ssids`, `ssid`, `wifi-health`, `air-marshal`), MX (`uplinks`, `vpn`, `vlans`, `routes`, `firewall`, `security`, `appliance`), switches (`ports`, `switch`), audit (`events`, `alerts`, `changes`, `admins`) and `get <path>`. Secrets are masked. Use it for all Meraki access |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
 | `vault_login.ps1` / `vault_login.sh` | Vault OIDC login in a private browser window (Windows / macOS). The token is never printed |
 | `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user |
@@ -47,7 +97,7 @@ Requests like "show me routes for 10.158.8.1", "where is 10.x.x.x routed" or "wh
 python cisco_helper.py route <ip-or-prefix> --json
 ```
 
-With no device options, this runs on every NetBox device tagged `wan_router`. Add `--site <name>`, `-d <device>` or `--vrf <name>` only when the user asks for them. In the JSON, each result's `route_result` is `found`, `not found` or `error`, and `output` holds the router's output. Found routes also have `route_detail`: `prefix`, `protocol`, `distance`, `metric` and `next_hops` (`next_hop`, `interface`, `active`). For recursive routes such as BGP, the helper looks up the route to the next hop on the same router to fill in the real outgoing interface, and records how it got there in `resolved_via` (e.g. `198.18.255.32/32 ospf 500 -> 198.18.0.30`). The text output's Summary shows all of this on one line per router.
+With no device options, this runs on every NetBox device tagged `wan_router`. Add `--site <name>`, `-d <device>` or `--vrf <name>` only when the user asks for them. On the Lakeview Hospital, Lakeside and Tulane cores, route lookups use VRF `buyer` automatically (see "VRFs on the cores"), and each result's `vrf` says which VRF was used. In the JSON, each result's `route_result` is `found`, `not found` or `error`, and `output` holds the router's output. Found routes also have `route_detail`: `prefix`, `protocol`, `distance`, `metric` and `next_hops` (`next_hop`, `interface`, `active`). For recursive routes such as BGP, the helper looks up the route to the next hop on the same router to fill in the real outgoing interface, and records how it got there in `resolved_via` (e.g. `198.18.255.32/32 ospf 500 -> 198.18.0.30`). The text output's Summary shows all of this on one line per router.
 
 To name the devices behind the destination and the next hops, look the IPs up in NetBox: `python netbox_helper.py ip <ip>` (device and interface) and `python netbox_helper.py prefix <ip>` (site, VLAN, VRF).
 
@@ -83,6 +133,8 @@ python cisco_helper.py bgp --tag wan_router                       # also ospf, e
 python cisco_helper.py cdp -d tls-wan-rtr-01                      # also cdp-detail, lldp
 python cisco_helper.py arp 10.158.136.10 -d tls-wan-rtr-01        # also mac [mac]
 python cisco_helper.py route 10.158.10.1                          # route lookup on all wan_router devices
+python cisco_helper.py locate 10.158.0.139                        # IP -> gateway -> MAC -> access switchport (see "Finding a device")
+python cisco_helper.py locate ac:b4:80:b9:a0:1f -d "lv-mdf-core-9500(1)"   # MAC trace from a starting device
 python cisco_helper.py cpu -d tls-wan-rtr-01                      # also memory, env, inventory, transceivers, ntp, clock, license, sla
 python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01   # any single show command
 python cisco_helper.py wlans -d lakeview-wlc-ha01                 # Catalyst 9800: WLAN/SSID summary
@@ -101,42 +153,98 @@ python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt -
 
 ## Cisco Meraki
 
-**Always use `meraki_helper.py` for Meraki.** Don't write ad-hoc `requests` calls. It reads the API key from Vault (`vault_helper.get_secret("meraki_api")`), uses the LCMC Health org (ID **793109**, the only org the key can access) by default, follows pagination, adjusts `perPage` to each endpoint's limit, and retries on `429`. It only sends `GET` requests.
+**Always use `meraki_helper.py` for Meraki.** Don't write ad-hoc `requests` calls. It reads the API key from Vault (`vault_helper.get_secret("meraki_api")`), uses the LCMC Health org (ID **793109**, the only org the key can access) by default, follows pagination, adjusts `perPage` to each endpoint's limit, and retries on `429` and `502/503/504`. It only sends `GET` requests. Live Tools (ping, cable test, blink and so on) need `POST`, so they are out of scope. **Secrets are masked** (`*****`) in every command's output, `--json` and `get` included: PSKs, RADIUS and VPN secrets, SNMP communities, passwords and license keys.
 
-Command line (start with these):
+Command line (`python meraki_helper.py <command> --help` lists each command's options):
 
 ```
-python meraki_helper.py sites                          # every network: device count, online count, types, tags
-python meraki_helper.py devices --network PUC_Kenner   # devices + status, LAN/public IP, last reported
-python meraki_helper.py devices --type appliance       # filter by productType
-python meraki_helper.py offline                        # every device whose status is not online
-python meraki_helper.py ssids                          # enabled SSIDs: networks, APs broadcasting, APs online, auth mode
-python meraki_helper.py ssids --by-network [--network PUC]   # one row per network + SSID (slot number, tag scoping)
+# Inventory and status
+python meraki_helper.py sites                              # every network: device count, online count, types, tags
+python meraki_helper.py devices --network PUC_Kenner [--type switch]   # devices + status, LAN/public IP, last reported
+python meraki_helper.py aps [--network PUC_Kenner]         # access points + status and tags
+python meraki_helper.py offline [--network X]              # every device whose status is not online
+python meraki_helper.py device "Kenner MX85"               # one device by name, serial or MAC: model, firmware, IPs, address, mgmt interface
+python meraki_helper.py inventory --unused [--type wireless]   # claimed hardware not in any network (spares)
+python meraki_helper.py licenses [--coterm [--all]]        # subscriptions, status, end dates, seats per SKU
+python meraki_helper.py firmware [--by-network] [--by-model] [--network X]   # firmware versions in use
+python meraki_helper.py firmware --scheduled | --history   # scheduled/in-progress or completed/canceled upgrades
+python meraki_helper.py availability --hours 72 [--summary] [--network X] [--type wireless]   # online/offline flaps
+
+# Clients
+python meraki_helper.py clients --network PUC_Kenner [--hours 24] [--ssid DATA] [--vlan 2] [--search dell] [--sort usage]
+python meraki_helper.py client 00:11:22:33:44:55           # org-wide MAC search: every network that has seen it
+python meraki_helper.py client 10.187.5.95 --network PUC   # IP or name: scans client lists (all networks if no --network; slow)
+python meraki_helper.py client <mac> --detail              # adds wireless connection stats
+python meraki_helper.py top clients|apps|ssids|devices|models|networks [--hours 24] [--limit 10]
+
+# Wireless
+python meraki_helper.py ssids [--by-network] [--network PUC]   # enabled SSIDs: networks, APs broadcasting/online, auth mode
+python meraki_helper.py ssid LCMC-DATA [--network PUC] [--full]   # one SSID's config per network (RADIUS, VLAN, scope); --full adds firewall/shaping/splash
+python meraki_helper.py rf-profiles [--network X]
+python meraki_helper.py wifi-health --network PUC_Kenner [--hours 24]   # failures by step (assoc/auth/dhcp/dns), per AP, channel utilization
+python meraki_helper.py air-marshal --network PUC_Kenner [--wired]      # rogue/neighbor SSIDs; --wired = also seen on the LAN
+python meraki_helper.py ap-ports [--network X]             # AP uplink: power source, PoE standard, speed, duplex
+
+# Appliance (MX/Z3), WAN and VPN
+python meraki_helper.py uplinks [--network X] [--loss] [--down]   # WAN1/WAN2/cellular status, IPs, gateway, DNS; --loss adds 5-min loss/latency
+python meraki_helper.py vpn [--network X] [--down]         # AutoVPN: peers, unreachable peers, exported subnets
+python meraki_helper.py vpn --config [--network X]         # site-to-site mode, hubs, subnets in VPN
+python meraki_helper.py vpn --third-party                  # third-party IPsec peers
+python meraki_helper.py vlans [--network X]                # VLAN id, name, subnet, MX IP, DHCP mode (all MX networks if no --network)
+python meraki_helper.py routes [--network X]               # MX static routes
+python meraki_helper.py firewall --network X [--kind l3|l7|inbound|portfwd|nat|nat-many]
+python meraki_helper.py security --network X               # content filtering, IDS/IPS, AMP settings
+python meraki_helper.py security --events [--network X] [--hours 24] [--limit 100]   # IDS/AMP events
+python meraki_helper.py sdwan --network X                  # uplink selection, bandwidth limits, traffic shaping
+python meraki_helper.py appliance --network X              # MX perf score, LAN ports, DHCP subnet usage, warm spare, settings
+
+# Switches (MS)
+python meraki_helper.py ports "Kenner MS130" [--port 12] [--connected] [--errors]   # port config + live status, PoE, LLDP/CDP neighbor
+python meraki_helper.py ports --network PUC_Kenner [--errors]    # every switch in the network
+python meraki_helper.py switch --network X [--kind stacks|stp|access-policies|dhcp-policy|acl|qos|mtu|settings|interfaces|routes]
+
+# Topology, events, audit
+python meraki_helper.py neighbors "Kenner MS130"           # LLDP/CDP neighbors per port
+python meraki_helper.py neighbors --network PUC_Kenner     # L2 topology links of a network
+python meraki_helper.py events --network X [--product wireless] [--type association] [--device NAME] [--client MAC] [--limit 100]
+python meraki_helper.py alerts [--network X] [--severity critical] [--all]   # assurance alerts (active by default)
+python meraki_helper.py changes [--hours 168] [--network X] [--admin name]   # Dashboard config change log (who changed what)
+python meraki_helper.py admins                             # Dashboard admins, access level, 2FA, last active
+python meraki_helper.py settings --network X               # network, syslog, SNMP, alerts, group policies, NetFlow, firmware
+
+# Anything else
 python meraki_helper.py get organizations/{org}/appliance/vpn/statuses
 python meraki_helper.py get networks/<networkId>/clients -p timespan=3600
-python meraki_helper.py get organizations/{org}/devices -p "productTypes[]=switch" --one-page
+python meraki_helper.py get organizations/{org}/devices -p "serials[]=A" -p "serials[]=B" --one-page
 ```
 
-- Add `--json` to `sites`, `devices` or `offline` for machine-readable output. `get` always prints JSON.
+- Every command takes `--json` (full records) and `-o FILE` (also write the output to a file; `--append` adds to it). `get` always prints JSON.
 - `{org}` in a path is replaced with the org ID. Write paths **without a leading slash**, because Git Bash rewrites `/organizations/...` into a Windows path.
-- `--network` takes an exact name or a unique substring. If the name matches several networks, the error lists them.
+- `--network`: commands that work on one network (`clients`, `firewall`, `events`, `wifi-health` and so on) take an exact name or a unique substring, and the error lists the matches if there are several. Commands that loop over networks (`vlans`, `routes`, `vpn`, `ssid`, `rf-profiles`, `firmware`, `client`) take an exact name, or else run on every network whose name contains the text.
+- Wherever a device is needed, a device name, serial or MAC works (exact name, else a unique substring).
 - Device status is one of `online`, `alerting`, `offline` or `dormant`.
+- Notes from testing (2026-10-12): the org uses **subscription licensing**, so `licenses/overview` returns 400 and `licenses` reads the subscriptions instead. Networks bound to a template (e.g. `PUC_*`) return 400 for `appliance/trafficShaping`, and `sdwan` shows that as an error section. `changes` returns one page of up to 5000 changes, newest first. `events` asks each product type in the network separately and merges the results. `clients` shows usage in MB, converted from the API's KB. `top` shows usage in MB, as the API reports it.
+- To follow up on a client, take its MAC to ISE (`ise_helper.py auth <mac>`) or Ordr (`ordr_helper.py device <mac>`). To compare MX subnets with NetBox, run `vlans`, then `netbox_helper.py prefix <ip>`.
 
 In Python, for anything the CLI doesn't cover:
 
 ```python
-from meraki_helper import Meraki
+from meraki_helper import Meraki, mask
 
 m = Meraki()
-net = m.network_by_name("PUC_Kenner")
-m.networks(); m.devices(productTypes=["appliance"]); m.device_statuses()
-m.uplink_statuses(); m.vpn_statuses(); m.sites()
-m.clients(net["id"], timespan=3600); m.vlans(net["id"]); m.lldp_cdp("Q2YN-....")
+net = m.network_by_name("PUC_Kenner"); dev = m.device_by_name("Kenner MX85")
+m.networks(); m.networks_matching("PUC", "wireless"); m.devices(); m.device_statuses(); m.inventory(usedState="unused")
+m.uplink_statuses(); m.uplink_loss_latency(); m.vpn_statuses(); m.third_party_vpn_peers(); m.sites(); m.subscriptions()
+m.clients(net["id"], timespan=3600); m.client_search("00:11:22:33:44:55"); m.vlans(net["id"]); m.static_routes(net["id"])
+m.ssids(net["id"]); m.ssid_usage(); m.switch_ports(serial); m.switch_port_statuses(serial); m.lldp_cdp(serial)
+m.events(net["id"], "wireless"); m.config_changes(timespan=86400); m.assurance_alerts(active="true"); m.admins()
+m.availability_changes(timespan=86400); m.firmware_upgrades(); m.security_events(86400); m.top("clients/byUsage")
 m.get_all("networks/{id}/appliance/firewall/l3FirewallRules")  # any list endpoint
-m.get("devices/{serial}")                                     # one object / one page
+m.get("devices/{serial}"); m.try_get(path)                    # one object; try_get returns {"error": ...} instead of raising
+print(mask(data))                                             # mask secrets before printing anything yourself
 ```
 
-How sites are named in Meraki (78 networks): `CHMPC *` = Children's clinics, `LRPG *` = Tulane/LRPG clinics, `PUC_*` = urgent care, `CC_*` = Community Connect partners (single Z3/MX), `* GUEST Internet` = hospital guest MXs, `UMC Concentrator` / `UMC ACB Concentrator` = VPN concentrators.
+How sites are named in Meraki (79 networks): `CHMPC *` = Children's clinics, `LRPG *` = Tulane/LRPG clinics, `PUC_*` = urgent care, `CC_*` = Community Connect partners (single Z3/MX), `* GUEST Internet` = hospital guest MXs, `UMC Concentrator` / `UMC ACB Concentrator` = VPN concentrators.
 
 Summarize the results for the user. Show raw JSON only when they ask for it. The `meraki` SDK is not installed and isn't needed.
 

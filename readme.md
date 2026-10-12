@@ -8,7 +8,7 @@ Read-only network tools for LCMC Health. Each `*_helper.py` script covers one sy
 | `cisco_helper.py` | Cisco devices over SSH | Show commands, route lookups, WLAN/SSID config |
 | `catalyst_helper.py` | Catalyst Center | Inventory sync, interfaces, clients, site and device health, issues |
 | `ise_helper.py` | Cisco ISE | Endpoints, sessions, authentications, network devices, policy sets |
-| `meraki_helper.py` | Meraki Dashboard | Networks, devices, SSIDs, subnets |
+| `meraki_helper.py` | Meraki Dashboard | Networks, devices, clients, SSIDs, wireless health, WAN/VPN, MX firewall and VLANs, switch ports, events, change log |
 | `ordr_helper.py` | Ordr | What an endpoint is: classification, risk, alarms, vulnerabilities |
 | `vault_helper.py` | HashiCorp Vault | Login and credentials for all of the above (used by the other helpers) |
 
@@ -84,6 +84,8 @@ Wireless (Catalyst 9800 controllers):
     python cisco_helper.py wlans -d site1-wlc-01                      # WLAN / SSID summary
     python cisco_helper.py ssid CORP-DATA -d site1-wlc-01 -o site1-ssids.txt            # all config for one SSID
     python cisco_helper.py ssid CORP-VOICE -d site1-wlc-01 -o site1-ssids.txt --append
+    python cisco_helper.py locate 192.0.2.25                     # trace an IP to its switchport (route, ARP, MAC, CDP)
+    python cisco_helper.py locate 00:11:22:33:44:55 -d core-01   # trace a MAC from a starting device
 
 ## catalyst_helper.py — Catalyst Center
 
@@ -117,13 +119,41 @@ Wireless (Catalyst 9800 controllers):
 
 ## meraki_helper.py — Meraki Dashboard
 
+Read-only (GET only). Secrets such as PSKs and RADIUS/VPN secrets are masked. Every command takes `--json` and `-o FILE`, and `<command> --help` lists its options.
+
     python meraki_helper.py sites                                   # networks with device and online counts
-    python meraki_helper.py devices --network Branch-01
-    python meraki_helper.py devices --type appliance
+    python meraki_helper.py devices --network Branch-01 [--type switch]
+    python meraki_helper.py aps --network Branch-01                 # access points with status and tags
     python meraki_helper.py offline                                 # devices that aren't online
-    python meraki_helper.py ssids                                   # SSIDs and how many APs broadcast them
-    python meraki_helper.py ssids --by-network --network Branch
-    python meraki_helper.py get "organizations/{org}/clients/search" -p mac=00:11:22:33:44:55 --one-page
+    python meraki_helper.py device Branch-01-MX                     # one device by name, serial or MAC
+    python meraki_helper.py inventory --unused                      # spare hardware not in a network
+    python meraki_helper.py licenses                                # subscriptions and seats per SKU
+    python meraki_helper.py firmware --by-network                   # firmware in use; --scheduled for upgrades
+    python meraki_helper.py availability --hours 72 --summary       # device up/down flaps
+    python meraki_helper.py clients --network Branch-01 --sort usage
+    python meraki_helper.py client 00:11:22:33:44:55                # where a MAC has been seen, org-wide
+    python meraki_helper.py client 192.0.2.25 --network Branch-01   # by IP or name
+    python meraki_helper.py top clients|apps|ssids|devices|models|networks
+    python meraki_helper.py ssids [--by-network]                    # SSIDs and how many APs broadcast them
+    python meraki_helper.py ssid Corp-WiFi [--full]                 # one SSID's config in each network
+    python meraki_helper.py wifi-health --network Branch-01         # failed connections by step and AP, channel use
+    python meraki_helper.py air-marshal --network Branch-01 --wired # rogue SSIDs seen on the LAN
+    python meraki_helper.py ap-ports                                # AP PoE and link speed
+    python meraki_helper.py rf-profiles --network Branch-01
+    python meraki_helper.py uplinks --loss                          # WAN status, IPs, loss and latency
+    python meraki_helper.py vpn --down                              # networks with unreachable AutoVPN peers
+    python meraki_helper.py vpn --config | --third-party
+    python meraki_helper.py vlans [--network Branch-01]             # MX VLANs, subnets, DHCP
+    python meraki_helper.py routes | firewall | security | sdwan | appliance --network Branch-01
+    python meraki_helper.py security --events                       # IDS/AMP events
+    python meraki_helper.py ports Branch-01-SW01 --connected        # switch ports: config, status, PoE, neighbor
+    python meraki_helper.py switch --network Branch-01 --kind stp
+    python meraki_helper.py neighbors Branch-01-SW01                # LLDP/CDP; --network for L2 topology
+    python meraki_helper.py events --network Branch-01 --product wireless
+    python meraki_helper.py alerts                                  # active assurance alerts
+    python meraki_helper.py changes --hours 168                     # Dashboard config change log
+    python meraki_helper.py admins
+    python meraki_helper.py settings --network Branch-01            # syslog, SNMP, alerts, group policies
     python meraki_helper.py get networks/<networkId>/appliance/vlans   # any API path (no leading slash)
 
 ## ordr_helper.py — Ordr
