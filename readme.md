@@ -27,7 +27,7 @@ The examples below use placeholder names and addresses (`site1-wan-rtr-01`, `192
 
 3. Set the Vault address once (Windows), or export `VAULT_ADDR` in your shell profile (macOS):
 
-       powershell -ExecutionPolicy Bypass -File .\set_vault_addr.ps1
+       setx VAULT_ADDR "https://<your-vault-host>:8200"
 
 4. Create `.env` with `VAULT_ADDR`, `VAULT_MOUNT`, `VAULT_PATH` and `LCMC_CACERT=certs/lcmc-epic-ca.pem`. The CA file lets Python trust the internal certificates that ISE and Catalyst Center use.
 

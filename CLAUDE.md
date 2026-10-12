@@ -87,7 +87,7 @@ On those same cores, **VRF `div` and the global (default) table are for isolated
 | `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI: inventory (`sites`, `devices`, `aps`, `device`, `inventory`, `licenses`, `firmware`), clients (`clients`, `client`, `top`), wireless (`ssids`, `ssid`, `wifi-health`, `air-marshal`), MX (`uplinks`, `vpn`, `vlans`, `routes`, `firewall`, `security`, `appliance`), switches (`ports`, `switch`), audit (`events`, `alerts`, `changes`, `admins`) and `get <path>`. Secrets are masked. Use it for all Meraki access |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
 | `vault_login.ps1` / `vault_login.sh` | Vault OIDC login in a private browser window (Windows / macOS). The token is never printed |
-| `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user |
+| `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user. **Local only:** it's in `.gitignore` and must not be committed, because it holds the internal Vault address |
 | `vault_list.py` | Lists the Vault secrets the logged-in account can see. Also used to sign in as a different user |
 | `requirements.txt` | Python dependencies |
 | `.env` | `VAULT_ADDR`, `VAULT_MOUNT` and `VAULT_PATH` (not secrets). It may also hold `LCMC_CACERT`, a path to the EPIC-CA root PEM |

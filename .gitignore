@@ -24,3 +24,6 @@ venv/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Local-only scripts (internal addresses)
+/set_vault_addr.ps1
