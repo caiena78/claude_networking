@@ -8,6 +8,8 @@ Read-only network tools for LCMC Health. Each `*_helper.py` script covers one sy
 | `cisco_helper.py` | Cisco devices over SSH | Show commands, route lookups, WLAN/SSID config |
 | `catalyst_helper.py` | Catalyst Center | Inventory sync, interfaces, clients, site and device health, issues |
 | `ise_helper.py` | Cisco ISE | Endpoints, sessions, authentications, network devices, policy sets |
+| `cdo_helper.py` | Cisco CDO / cdFMC | FTD devices, HA, interfaces, routes, prefilter rule checks |
+| `ftd_capture_helper.py` | FTD over SSH | Packet captures on the active unit (the only write action) |
 | `meraki_helper.py` | Meraki Dashboard | Networks, devices, clients, SSIDs, wireless health, WAN/VPN, MX firewall and VLANs, switch ports, events, change log |
 | `ordr_helper.py` | Ordr | What an endpoint is: classification, risk, alarms, vulnerabilities |
 | `vault_helper.py` | HashiCorp Vault | Login and credentials for all of the above (used by the other helpers) |
@@ -166,6 +168,30 @@ Read-only (GET only). Secrets such as PSKs and RADIUS/VPN secrets are masked. Ev
     python ordr_helper.py summary                                   # alarm and vulnerability summaries
     python ordr_helper.py profiles
     python ordr_helper.py get Rest/Devices -p mfg=Philips --all     # any API path
+
+## cdo_helper.py — Cisco CDO (cloud-delivered FMC)
+
+Read-only (GET only). It needs `CDO_URL` in `.env`, and `CDO_UUID` and `CDO_API` as environment variables.
+
+    python cdo_helper.py devices                                    # managed FTDs
+    python cdo_helper.py ha                                         # HA pairs
+    python cdo_helper.py interfaces FW-01                           # interfaces of one device
+    python cdo_helper.py routes FW-01                               # static routes
+    python cdo_helper.py prefilter-rules                            # Vendor-Prefilter-Policy rules in order
+    python cdo_helper.py prefilter-check --src 192.0.2.10 --dst 198.51.100.5 --ports 443,udp/53
+    python cdo_helper.py prefilter-check --input request.csv --summary
+
+## ftd_capture_helper.py — FTD packet captures
+
+The only helper that changes anything on a device: it creates and removes `CLAUDE_*` packet captures, on the active unit only, on the firewalls in `FTD_CAPTURE_HOSTS` (`.env`). Credentials come from `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD`.
+
+    python ftd_capture_helper.py status                             # failover state
+    python ftd_capture_helper.py interfaces --src 192.0.2.10 --dst 198.51.100.5
+    python ftd_capture_helper.py start --src 192.0.2.10 --dst 198.51.100.5 --port 443 --ingress Inside1 --egress DMZ1   # plan only
+    python ftd_capture_helper.py start ... --yes                    # create and leave running
+    python ftd_capture_helper.py check                              # allowed or denied, and by which rule
+    python ftd_capture_helper.py stop                               # remove the captures
+    python ftd_capture_helper.py cleanup                            # leftover CLAUDE_* captures
 
 ## Other scripts
 

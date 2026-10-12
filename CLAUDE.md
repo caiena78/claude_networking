@@ -84,6 +84,8 @@ On those same cores, **VRF `div` and the global (default) table are for isolated
 | `netbox_helper.py` | **The inventory.** CLI: `sites`, `devices`, `device`, `ip`, `prefix`, `prefixes`, `tags`. Also `get_devices()` (used by `cisco_helper.py`) and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `catalyst_helper.py` | Read-only Cisco Catalyst Center (DNA Center) client and CLI (`devices`, `device`, `count`, `interfaces`, `config`, `client`, `sites`, `health`, `device-health`, `issues`, `get <path>`). Use it for all Catalyst Center access |
 | `ise_helper.py` | Read-only Cisco ISE client and CLI for the ERS, MnT and OpenAPI interfaces (`lookup`, `session`, `auth`, `active`, `nad`, `nads`, `groups`, `nodes`, `policy-sets`, `ers`, `mnt`, `api`). Use it for all ISE access |
+| `cdo_helper.py` | Read-only Cisco Security Cloud Control (CDO) cloud-delivered FMC client and CLI (`devices`, `ha`, `interfaces`, `routes`, `objects`, `prefilter-rules`, `prefilter-check`, `get <path>`). Use it for all CDO / FMC access and for checking whether a prefilter rule allows traffic |
+| `ftd_capture_helper.py` | Packet captures on the FTD firewalls listed in `.env` (`FTD_CAPTURE_HOSTS`), on the **active** unit only (`status`, `interfaces`, `list`, `start`, `check`, `stop`, `sessions`, `capture`, `cleanup`). **This is the only helper that changes anything on a device**, and the rules are under "FTD packet captures" |
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |
 | `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI: inventory (`sites`, `devices`, `aps`, `device`, `inventory`, `licenses`, `firmware`), clients (`clients`, `client`, `top`), wireless (`ssids`, `ssid`, `wifi-health`, `air-marshal`), MX (`uplinks`, `vpn`, `vlans`, `routes`, `firewall`, `security`, `appliance`), switches (`ports`, `switch`), audit (`events`, `alerts`, `changes`, `admins`) and `get <path>`. Secrets are masked. Use it for all Meraki access |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
@@ -91,7 +93,7 @@ On those same cores, **VRF `div` and the global (default) table are for isolated
 | `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user. **Local only:** it's in `.gitignore` and must not be committed, because it holds the internal Vault address |
 | `vault_list.py` | Lists the Vault secrets the logged-in account can see. Also used to sign in as a different user |
 | `requirements.txt` | Python dependencies |
-| `.env` | `VAULT_ADDR`, `VAULT_MOUNT` and `VAULT_PATH` (not secrets). It may also hold `LCMC_CACERT`, a path to the EPIC-CA root PEM. **`.env` is the only place the Vault address is kept.** `vault_helper.py` (and so every helper and `vault_list.py`), `vault_login.ps1`, `vault_login.sh` and `set_vault_addr.ps1` read `VAULT_ADDR` from it, and it wins over a `VAULT_ADDR` environment variable. Never hard-code the address in a tracked file. For the other keys, an environment variable still wins over `.env` |
+| `.env` | `VAULT_ADDR`, `VAULT_MOUNT` and `VAULT_PATH`, plus `CDO_URL` and `FTD_CAPTURE_HOSTS` (none of them secrets). It may also hold `LCMC_CACERT`, a path to the EPIC-CA root PEM. **`.env` is the only place the Vault address is kept.** `vault_helper.py` (and so every helper and `vault_list.py`), `vault_login.ps1`, `vault_login.sh` and `set_vault_addr.ps1` read `VAULT_ADDR` from it, and it wins over a `VAULT_ADDR` environment variable. Never hard-code the address in a tracked file. For the other keys, an environment variable still wins over `.env` |
 | `.env.old` | Backup. Do not read it, use it or change it |
 
 Vault secrets at `VAULT_MOUNT`/`VAULT_PATH`: `ansible_user`, `ansible_password`, `ansible_become_password` (enable secret), `netbox_url`, `netbox_token`, `meraki_api` (Cisco Meraki Dashboard API key), `ORDR_URL`, `ORDR_USER`, `ORDR_PASSWORD`, `ORDR_TENANTGUID` (Ordr SCE API), `ise_url`, `ise_user`, `ise_password` (Cisco ISE), `cat_url`, `cat_user`, `cat_password` (Cisco Catalyst Center).
@@ -420,6 +422,132 @@ ise.mnt("Session/ActiveCount"); ise.api("deployment/node")
 
 Summarize the results for the user. Show raw JSON only when they ask for it.
 
+## Cisco CDO (cloud-delivered FMC)
+
+Use CDO for **firewall policy and config** on the FTDs it manages: devices, HA pairs, interfaces, static routes, network objects, and prefilter policies and rules. Use `ftd_capture_helper.py` to see what the firewall *actually does* with live traffic.
+
+**Always use `cdo_helper.py` for CDO.** Don't write ad-hoc `requests` calls. It sends only `GET` requests, pages with `limit`/`offset`, and retries on `429`, because FMC allows about 120 requests a minute.
+
+**Settings (an exception to "credentials come from Vault"):**
+- `CDO_URL`: the tenant URL. It's in `.env`, because it isn't a secret.
+- `CDO_UUID` (the FMC domain UUID) and `CDO_API` (the bearer token): **environment variables**. Never put them in `.env` or any file, and never print them.
+- The helper exits if any of the three is missing.
+
+```
+python cdo_helper.py devices                       # managed FTDs: model, version, health, device group
+python cdo_helper.py ha                            # FTD HA pairs
+python cdo_helper.py interfaces <device>           # all interfaces: nameif, IP, security zone
+python cdo_helper.py routes <device>               # IPv4 static routes
+python cdo_helper.py objects <name-or-value>       # network objects
+python cdo_helper.py prefilter-rules [--policy NAME]   # rules in order (default Vendor-Prefilter-Policy)
+python cdo_helper.py prefilter-check --src <ip|cidr|a-b> --dst <ip|cidr|a-b> --ports 443,tcp/22,udp/1194,8000-8010,icmp
+python cdo_helper.py prefilter-check --input <file> [--summary]   # pasted CSV / spreadsheet rows
+python cdo_helper.py get object/networkgroups -p expanded=true    # any GET path under the domain
+```
+
+### Rule lookup ("does a rule already allow this?")
+
+The user gives a source, a destination and one or more destination ports. `prefilter-check` searches `Vendor-Prefilter-Policy` (use `--policy` for another) and reports whether an existing **enabled** rule already allows the traffic. It is read-only and never creates or changes rules. Report only what would need to change. It takes about 12 seconds.
+
+- **Ports:** `443` (TCP), `tcp/443`, `udp/53`, `any/443` (any protocol), `8000-8010` (a TCP range) and `icmp`. Without `--ports`, it lists every rule whose source and destination match, including disabled and BLOCK rules (both flagged), with each rule's ports.
+- **Matching:**
+  - Only enabled rules count.
+  - `FASTPATH` and `ANALYZE` allow traffic. A matching `BLOCK` denies it.
+  - Rules are evaluated top-down by `metadata.ruleIndex`, and the first match wins.
+  - A rule matches only if its object **fully contains** the requested network. Rules that cover only part of it are listed under "PARTIAL IP OVERLAP".
+  - Empty networks or ports on a rule mean any.
+  - FQDN objects can't be checked against an IP and are flagged.
+  - Interfaces aren't part of the match, but they're reported.
+- **Pasted CSV / spreadsheet rows** have three columns (source, destination, ports). Cells are often quoted, span several lines and mix labels with values. Save the text to a scratchpad file exactly as pasted and use `--input`. The parser:
+  - splits on tabs, then commas, and falls back to cells taken three at a time;
+  - folds an optional 4th protocol column into the ports;
+  - pulls every IP, CIDR and range out of the text (`10.194.23.197-200` expands to a full range);
+  - reads ports line by line, applying a `TCP`/`UDP` on a line to every port on it, and defaults to TCP;
+  - checks every source × destination pair.
+- **What to report:**
+  - Which rule and object covers each destination and port.
+  - Which ports are **MISSING**, with the port objects on the closest matching rule. Point out an object that has the right numbers but the wrong protocol.
+  - What to change: add a port object to an existing rule (preferred), change a shared object (warn that this affects other rules), or create a new rule.
+  - Present it as a short summary, then a table per matching rule.
+
+## FTD packet captures
+
+`ftd_capture_helper.py` runs packet captures over SSH on the FTD firewalls listed in `.env`. It's the **only write action** allowed in this repo, and it may only create, start, stop and remove packet captures. Everything else stays read-only.
+
+**Which firewalls:** only the units in `FTD_CAPTURE_HOSTS` in `.env`. The helper refuses to connect to anything else.
+- **Format:** units of one HA pair are separated by commas, and firewalls are separated by semicolons. A unit can carry an optional label, as `ip=name`. For example: `FTD_CAPTURE_HOSTS=<unit1-ip>=NAME-01,<unit2-ip>=NAME-02;<other-pair-ip1>,<other-pair-ip2>`.
+- **Choosing a firewall:** with more than one configured, pass `--fw <ip or label>`.
+- **Standalone firewall:** a group with one IP is a standalone unit. It must report failover Off.
+- **Adding a firewall:** add its IPs to `FTD_CAPTURE_HOSTS`. Never hard-code unit IPs in tracked files, because the repo is public.
+- **Currently configured:** the `UMC-FTD-2130-VENDOR-HA` pair (Firepower 2130, FTD 7.4.4). On 2026-10-12 the Secondary (`-02`) was Active. Never assume this; the helper checks every time.
+
+**Credentials:** the environment variables `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` (not Vault, not `.env`). Never hard-code, print or log them, and never ask the user to paste a password into the chat.
+
+**Connecting:** netmiko with `device_type="cisco_ftd"` and generous timeouts, because some units are slow to show the prompt. The netmiko session log is off, since it would record the login. The helper stays at the `>` CLISH prompt and never enters `expert` mode or `configure`.
+
+### Rules
+
+1. **Active unit only.** Before every capture, the helper runs `show failover` on both units of the pair. It continues only if exactly one unit is `Active` and the other is `Standby Ready`, and it captures on the active unit only. If the state is unclear (both or neither active, a unit unreachable, or failover not `On`), **don't capture**. Show the user the output and stop.
+2. **Confirm first.** Before starting a capture, show the plan (`start` or `capture` **without** `--yes`) and wait for a yes for that specific capture: the active unit and IP, the `nameif`s, the match filter, the buffer and the exact commands. Approval for one capture doesn't carry over to the next. **Exception:** when the user asks whether specific traffic is allowed (below), the request plus their interface choices count as approval.
+3. **Always filter and limit.** Every capture has a `match` with a source and a destination, plus a `buffer` (default 1 MB, at most 32 MB), and never uses `circular-buffer`. Trace captures set `trace-count` (default 20, at most 100). `asp-drop` captures also need a `match`.
+4. **Reuse before creating.** If an existing capture (anyone's) already has the required settings, it's used instead of a new one. A stopped one is started with `no capture <name> stop` and stopped again when finished. A running one is left running. Tell the user which existing capture is being used.
+5. **Naming.** Every capture Claude creates is named `CLAUDE_<DESC>_<IN|OUT|DROP>`. `DESC` comes from the protocol, port and destination, or from `--name`, and is at most 20 characters. The helper checks for name clashes.
+6. **Clean up.** When done, the output is saved under `captures/` (git-ignored) and the `CLAUDE_*` captures are removed. Only ever remove `CLAUDE_*` captures. Never remove, clear or reconfigure anyone else's; the only thing allowed on them is starting and stopping them (rule 4). After an interrupted session, check for leftover `CLAUDE_*` captures (`cleanup`) and offer to remove them.
+7. **Allowed commands only:** `show ...`, `capture CLAUDE_* ...`, `no capture CLAUDE_*`, and `capture <name> stop` / `no capture <name> stop`. Never config changes, `clear`, failover commands, `reload` or `copy`. The helper enforces this with an allowlist.
+8. **No packet-tracer.** It doesn't evaluate prefilter rules, so its verdict is wrong for `Vendor-Prefilter-Policy` traffic. Verdicts come only from live trace captures.
+
+```
+python ftd_capture_helper.py status                               # failover state of the units
+python ftd_capture_helper.py interfaces [--src <ip> --dst <ip>] [--refresh]   # cached nameifs; marks route-suggested ones
+python ftd_capture_helper.py list                                 # all captures on the active unit
+python ftd_capture_helper.py start --src <ip|cidr> --dst <ip|cidr> [--proto tcp|udp|icmp|ip] [--port 53|8000-8010] \
+       --ingress <nameif> --egress <nameif> [--name <DESC>] [--buffer 1048576] [--trace-count 20]   # PLAN only
+python ftd_capture_helper.py start ... --yes                      # create / reuse captures and leave them RUNNING
+python ftd_capture_helper.py check [--name <DESC>]                # allowed or denied, and by which rule (read-only)
+python ftd_capture_helper.py stop  [--name <DESC>] [--stop-only]  # remove new captures (or just stop them), re-stop reused ones
+python ftd_capture_helper.py sessions                             # open sessions
+python ftd_capture_helper.py capture ... --ingress X --egress Y [--duration 60] [--yes] [--keep]   # one-shot
+python ftd_capture_helper.py cleanup [--yes]                      # leftover CLAUDE_* captures
+```
+
+**Sessions and output:**
+- `start` records the session in `captures/sessions.json`: the firewall, active unit, capture names, what was reused or started, and each capture's packet count at the start.
+- `check` analyses only the packets added since `start`. Capture timestamps aren't used, because they don't match `show time`.
+- If a failover happened since `start`, `check` and `stop` stop and say so.
+- Interface lists are cached per firewall in `ftd_interfaces.json` (git-ignored) for 7 days.
+
+### Is this traffic allowed?
+
+When the user asks whether specific traffic is allowed (for example "is 10.1.1.1 to 10.9.9.9 on udp 53 allowed?"):
+
+1. **Choose interfaces.** Run `ftd_capture_helper.py interfaces --src <src> --dst <dst>` and show the table. Ask for the **source (ingress)** and **destination (egress)** interfaces with `AskUserQuestion`: two questions, with the route-suggested interface first and marked "(Recommended)". Never pick them for the user.
+2. **Start the capture.** Run `start ... --ingress <src-if> --egress <dst-if>`, then the same with `--yes` (the request is the approval). Show the plan, the captures created and any `USING EXISTING CAPTURE` lines. If no protocol was given, use `tcp`.
+3. **Check the policy.** Also run `cdo_helper.py prefilter-check` for the same source, destination and port. It shows which rule *should* match.
+4. **Ask exactly: "do you want me to check for traffic?"**, then wait. The user may need time to generate the traffic.
+5. **If yes,** run `check --name <DESC>`. Report **ALLOWED / DENIED / NOT SEEN / UNCLEAR**, the matched `RULE:` line compared with `prefilter-check`, and the drop reason if it was denied. If the result is NOT SEEN, offer to check again later.
+6. **Ask whether to disable the capture** (`AskUserQuestion`): "Yes, remove it (Recommended)" runs `stop`, "Stop it but keep it" runs `stop --stop-only`, and "No, leave it running" does nothing, but remind the user that `sessions` lists it. Ask this after the check, and also if the user says no to checking.
+
+For a plain capture request (not "is it allowed?"), choose interfaces the same way, show the `capture ...` plan **without** `--yes`, and run it with `--yes` only after the user approves.
+
+**Verdicts:**
+
+| What the captures show | Verdict |
+|---|---|
+| `_IN` trace `Action: allow`, packets in `_OUT`, and a reply | **ALLOWED**, and the destination replied |
+| `_IN` trace `Action: allow`, packets in `_OUT`, no reply | **ALLOWED by the firewall, no reply.** The problem is past it (server, host firewall or return routing) |
+| `_IN` trace `Action: drop`, or the flow is in `_DROP` | **DENIED.** Report the drop reason (`acl-drop`, `no-route`, `rpf-violated`, ...) |
+| Nothing in `_IN` | **NOT SEEN.** The traffic never reached the firewall, or wasn't generated during the capture |
+| Seen on `_IN`, not `_OUT`, no drops | **UNCLEAR.** Review the saved output |
+
+`Vendor-Prefilter-Policy` rules use FASTPATH, so allowed traffic should show the prefilter rule and fastpath. A capture only sees traffic sent **while it runs**, so ask the user to generate it.
+
+**FTD CLI quirks the helper handles:**
+- `show capture` can list names as `NAME%intf=<nameif>%`. The suffix is part of the real name.
+- There's no `show clock`; use `show time`.
+- When the CLI rejects a command, it leaves the text on the line, so the helper clears the line with Ctrl+U and stops.
+- Long `capture` commands wrap on the terminal, so they're sent without echo verification and then confirmed with `show capture`.
+- A reused capture whose packet count doesn't move gives no data. Prefer a new `CLAUDE_` capture in that case.
+
 ## Vault login
 
 The helpers reuse `VAULT_TOKEN` or `~/.vault-token`. If neither is valid, it opens a browser OIDC login and saves the new token to `~/.vault-token`. The Vault address always comes from `VAULT_ADDR` in `.env`. To log in beforehand with the Vault CLI directly:
@@ -456,8 +584,10 @@ Known problem: `claim "samaccountname" not found in token` means the account use
 - ISE is **read-only**: go through `ise_helper.py`, which only sends `GET` requests. Never `POST`, `PUT` or `DELETE` to ERS or OpenAPI, and never send CoA, reauthenticate or disconnect requests through MnT (`/admin/API/mnt/CoA/...`). Those change live network access. The only exception is when the user explicitly asks for that specific change and confirms it.
 - Ordr is **read-only**: go through `ordr_helper.py`, which only sends `GET` requests. Never call the Ordr write endpoints (`POST /Rest/SecurityAlarm/StateChange` clears alarms, `POST /Rest/SecurityAlarms/mute` mutes them, and so on for `Vulnerabilities/StateChange`, `UpdateAssetInfo`, `DeviceOnboard`, `UserLocations` and `UserRole`), unless the user explicitly asks for that specific change and confirms it.
 - Never put secrets in `.env`. Do not touch `.env.old`.
-- Only read-only `show` commands on the routers. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state.
-- **No ad-hoc snippets.** Use the helpers (`netbox_helper.py`, `cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it. See "Ground rules" at the top.
+- Only read-only `show` commands on the routers. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state. **The one exception** is `ftd_capture_helper.py`. It may create, start, stop and remove packet captures on the `FTD_CAPTURE_HOSTS` firewalls, under the rules in "FTD packet captures".
+- CDO is **read-only**: go through `cdo_helper.py`, which only sends `GET` requests. Never `POST`, `PUT` or `DELETE` to the FMC API (that changes firewall policy), unless the user explicitly asks for that specific change and confirms it.
+- `CDO_UUID`, `CDO_API`, `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` are environment variables. Never print them, log them or write them to a file.
+- **No ad-hoc snippets.** Use the helpers (`netbox_helper.py`, `cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `cdo_helper.py`, `ftd_capture_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it. See "Ground rules" at the top.
 - **NetBox is the source of truth for inventory.** Look devices up there first.
 - Run show commands on devices only when the user asks for information from them. Keep to the devices the question needs.
 

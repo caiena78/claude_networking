@@ -7,7 +7,7 @@ Which firewalls: only the units listed in .env as FTD_CAPTURE_HOSTS. Separate th
 with commas and separate pairs with semicolons. A unit may carry a label as ip=name. A group with a single
 IP is a standalone firewall (it must report failover Off).
     FTD_CAPTURE_HOSTS=192.0.2.11,192.0.2.12
-    FTD_CAPTURE_HOSTS=192.0.2.11=VENDOR-01,192.0.2.12=VENDOR-02;10.1.1.1,10.1.1.2
+    FTD_CAPTURE_HOSTS=192.0.2.11=FW-01,192.0.2.12=FW-02;198.51.100.1,198.51.100.2
 Pick a firewall with --fw <ip or label> when more than one is configured.
 
 Credentials: CISCO_SRV_ACCOUNT / CISCO_SRV_PWD environment variables (never printed or logged).
