@@ -12,7 +12,15 @@
 # The token is saved to ~/.vault-token (the Vault CLI's default) and is never printed.
 # Safari has no command-line private mode, so it isn't supported.
 
-VAULT_ADDR="${VAULT_ADDR:-https://<vault-host>:8200}"
+# The Vault address: $VAULT_ADDR, else VAULT_ADDR in .env next to this script (not committed to git).
+if [ -z "$VAULT_ADDR" ] && [ -f "$(dirname "$0")/.env" ]; then
+    VAULT_ADDR="$(grep -E '^[[:space:]]*VAULT_ADDR[[:space:]]*=' "$(dirname "$0")/.env" | head -n 1 | cut -d= -f2- \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')"
+fi
+if [ -z "$VAULT_ADDR" ]; then
+    echo "VAULT_ADDR is not set. Set it in the environment or in .env (VAULT_ADDR=https://<vault-host>:8200)." >&2
+    exit 1
+fi
 export VAULT_ADDR
 BROWSER="chrome"
 PROMPT="select_account"

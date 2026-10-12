@@ -9,7 +9,7 @@
 # The token is saved to ~\.vault-token (the Vault CLI's default) and is never printed.
 
 param(
-    [string]$Address = $(if ($env:VAULT_ADDR) { $env:VAULT_ADDR } else { "https://<vault-host>:8200" }),
+    [string]$Address = $env:VAULT_ADDR,  # else VAULT_ADDR from .env next to this script
     [ValidateSet("select_account", "login", "none")]
     [string]$Prompt = "select_account",
     [ValidateSet("edge", "chrome", "firefox")]
@@ -19,6 +19,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# The Vault address: -Address, else $env:VAULT_ADDR, else VAULT_ADDR in .env (not committed to git).
+if (-not $Address) {
+    $envFile = Join-Path $PSScriptRoot ".env"
+    if (Test-Path $envFile) {
+        $line = Get-Content $envFile | Where-Object { $_ -match '^\s*VAULT_ADDR\s*=' } | Select-Object -First 1
+        if ($line) { $Address = ($line -split '=', 2)[1].Trim().Trim('"').Trim("'") }
+    }
+}
+if (-not $Address) { Write-Error "VAULT_ADDR is not set. Set it in the environment or in .env (VAULT_ADDR=https://<vault-host>:8200)." }
 
 # Find the Vault CLI.
 $vault = (Get-Command vault -ErrorAction SilentlyContinue).Source
