@@ -31,3 +31,7 @@ Thumbs.db
 # Packet capture output and sessions (packet data)
 captures/
 ftd_interfaces.json
+
+# Investigation reports (internal hostnames, IPs, endpoint names)
+reports/
+*.pdf

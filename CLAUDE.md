@@ -11,6 +11,7 @@ Network operations toolkit for LCMC Health. It answers questions about routers, 
 python netbox_helper.py sites --name Lake
 python netbox_helper.py devices --site Lakeside [--tag wan_router] [--role wan] [--name wlc]
 python netbox_helper.py device lakeview-wlc-ha01        # full record: site, role, model, serial, platform, primary IP, tags
+python netbox_helper.py vc wp-6flr                      # virtual chassis (stack): master, members, positions, serials
 python netbox_helper.py ip 10.158.8.21                  # which device and interface has an IP
 python netbox_helper.py prefix 10.158.10.25             # prefixes (site, VLAN, VRF, role) containing an IP
 python netbox_helper.py prefixes --site Tulane [--vlan 700] [--vrf buyer] [--search text]   # subnet -> site list
@@ -18,6 +19,8 @@ python netbox_helper.py tags
 ```
 
 `--site` accepts a site name, a slug or a unique part of a name. `--json` gives full output.
+
+**Virtual chassis (switch stacks):** NetBox models a stack as a virtual chassis, for example `wp-6flr` with members `wp-6flr(1)` to `wp-6flr(7)`, and usually only the master has a management IP. Device lookups (`devices`, and `cisco_helper.py -d/--site/--name`) return each stack as **one** device. It's named after the virtual chassis, connects to the master's IP, and lists its `members`. A name filter also matches virtual chassis names. Use `devices --members` to list members separately, and `vc <name>` for the member details.
 
 3. **Look devices up in the order below** (see "Finding a device").
 4. **Don't use the `netbox-netmiko-mcp` MCP tools** (`mcp__netbox-netmiko-mcp__*`), even if they're connected. That server is abandoned, and this repo replaces it. Use the helpers.
@@ -44,6 +47,8 @@ Use Catalyst Center or Meraki for a Cisco device only for their own data (health
    `python catalyst_helper.py client <mac>`
 
 If none of them has it, or the IP is in a Meraki site (NetBox prefix site `Cisco Meraki`, or the `PUC_*`, `LRPG *`, `CHMPC *` and `CC_*` networks), use `python meraki_helper.py client <mac|ip>`.
+
+**One command for all of it:** `python endpoint_helper.py whois <ip|mac>` runs this whole order. It does NetBox, then the switchport trace below, then Ordr, ISE and Catalyst (stopping at the first that knows the device; `--all` asks every one), then Meraki. Use it first for "what is / where is this device". For a wireless MAC on the on-prem WLCs, `python cisco_helper.py wclient <mac>` asks every 9800 and AireOS controller. See the `network-reports` skill.
 
 **Finding the switchport for an IP** ("where is 10.x.x.x plugged in", "what port is this IP on"): trace it through the network with `cisco_helper.py locate`:
 
@@ -79,15 +84,22 @@ On those same cores, **VRF `div` and the global (default) table are for isolated
 
 | File | Role |
 |---|---|
-| `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command), plus `locate <ip\|mac>` (traces an IP to its switchport). Use it for everything run on a device |
+| `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command), plus `locate <ip\|mac>` (traces an IP to its switchport) and `wclient <mac>` (finds a wireless client on the 9800 and AireOS WLCs). Use it for everything run on a device |
 | `vault_helper.py` | Vault login (token from `VAULT_TOKEN`, then `~/.vault-token`, then OIDC browser login), `get_secrets()` (router and NetBox credentials) and `get_secret(key)` (any one key, e.g. `meraki_api`) |
 | `netbox_helper.py` | **The inventory.** CLI: `sites`, `devices`, `device`, `ip`, `prefix`, `prefixes`, `tags`. Also `get_devices()` (used by `cisco_helper.py`) and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `catalyst_helper.py` | Read-only Cisco Catalyst Center (DNA Center) client and CLI (`devices`, `device`, `count`, `interfaces`, `config`, `client`, `sites`, `health`, `device-health`, `issues`, `get <path>`). Use it for all Catalyst Center access |
 | `ise_helper.py` | Read-only Cisco ISE client and CLI for the ERS, MnT and OpenAPI interfaces (`lookup`, `session`, `auth`, `active`, `nad`, `nads`, `groups`, `nodes`, `policy-sets`, `ers`, `mnt`, `api`). Use it for all ISE access |
-| `cdo_helper.py` | Read-only Cisco Security Cloud Control (CDO) cloud-delivered FMC client and CLI (`devices`, `ha`, `interfaces`, `routes`, `objects`, `prefilter-rules`, `prefilter-check`, `get <path>`). Use it for all CDO / FMC access and for checking whether a prefilter rule allows traffic |
-| `ftd_capture_helper.py` | Packet captures on the FTD firewalls listed in `.env` (`FTD_CAPTURE_HOSTS`), on the **active** unit only (`status`, `interfaces`, `list`, `start`, `check`, `stop`, `sessions`, `capture`, `cleanup`). **This is the only helper that changes anything on a device**, and the rules are under "FTD packet captures" |
+| `cdo_helper.py` | Read-only Cisco Security Cloud Control (CDO) cloud-delivered FMC client and CLI (`devices`, `ha`, `interfaces`, `routes`, `objects`, `policies`, `prefilter-rules`, `prefilter-check`, `acp-check`, `nat-check`, `get <path>`). Use it for all CDO / FMC access and for checking whether a prefilter or access rule allows traffic. Guide: skill `cdo-firewall-policy` |
+| `ftd_capture_helper.py` | Packet captures on the FTD firewalls listed in `.env` (`FTD_CAPTURE_HOSTS`), on the **active** unit only (`status`, `interfaces`, `list`, `start`, `check`, `stop`, `sessions`, `capture`, `cleanup`). **This is the only helper that changes anything on a device.** It logs every change to `captures/audit.log`. Rules: skill `ftd-packet-captures` |
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |
 | `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI: inventory (`sites`, `devices`, `aps`, `device`, `inventory`, `licenses`, `firmware`), clients (`clients`, `client`, `top`), wireless (`ssids`, `ssid`, `wifi-health`, `air-marshal`), MX (`uplinks`, `vpn`, `vlans`, `routes`, `firewall`, `security`, `appliance`), switches (`ports`, `switch`), audit (`events`, `alerts`, `changes`, `admins`) and `get <path>`. Secrets are masked. Use it for all Meraki access |
+| `endpoint_helper.py` | Combined, read-only answers: `whois <ip\|mac>` (NetBox, switchport trace, then Ordr → ISE → Catalyst, then Meraki) and `path <src> <dst> --port N` (which FTDs sit between two IPs and what their prefilter, access and NAT policies decide). Guide: skill `network-reports` |
+| `audit_helper.py` | NetBox drift reports: `prefixes --site` (vs subnets connected on the cores), `devices` (vs Catalyst Center and Meraki serials), `meraki-vlans`. Read-only |
+| `report_helper.py` | `daily`: one health brief across Meraki, Catalyst Center, ISE and CDO (`--no-cdo` skips your personal CDO key) |
+| `helper_common.py` | Shared output code: `table()`, `to_json()`, `Out` (for `-o FILE`), MAC formatting. New helpers use it |
+| `tools/leak_check.py`, `.githooks/pre-commit` | Leak guard: blocks commits containing `.env` values (Vault, CDO tenant, FTD IPs), your personal secrets, or token/key patterns. Enable once per clone with `git config core.hooksPath .githooks` |
+| `tests/` | Offline tests for the parsers and policy matching: `python -m pytest -q` (no network, Vault or devices). `.github/workflows/checks.yml` runs them, the leak check and gitleaks on every push |
+| `.claude/skills/` | Per-system guides (see "Other systems (skills)") |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
 | `vault_login.ps1` / `vault_login.sh` | Vault OIDC login in a private browser window (Windows / macOS and Linux). The token is never printed. Both also save `VAULT_ADDR` from `.env` permanently, writing it only when it changes. `vault_login.ps1` sets a user environment variable (`-NoPersist` skips this), so `set_vault_addr.ps1` is no longer needed. `vault_login.sh` writes one `export VAULT_ADDR=...  # set by vault_login.sh` line to `~/.zshrc`, `~/.bash_profile` (macOS bash), `~/.bashrc` (Linux bash) or `~/.profile` (`-n` skips this) |
 | `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user. **Local only:** it's in `.gitignore` and must not be committed, because it holds the internal Vault address |
@@ -149,6 +161,8 @@ python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01  
 python cisco_helper.py wlans -d lakeview-wlc-ha01                 # Catalyst 9800: WLAN/SSID summary
 python cisco_helper.py ssid LCMC-DATA -d lakeview-wlc-ha01 -o lakeviewssid.txt   # all config for an SSID
 python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt --append
+python cisco_helper.py wclient 78:02:8b:19:63:0e                  # wireless client on every WLC in NetBox (9800 + AireOS): AP, SSID, VLAN, IP, user
+python cisco_helper.py wclient <mac> -d umc-wlc-8540-01            # one controller; anchor/foreign mobility is shown
 ```
 
 - `-o FILE` also writes the results to a file (`--append` adds to it). Use it when the user asks for output in a file. `.gitignore` excludes `*.txt`.
@@ -160,393 +174,19 @@ python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt -
 - Exit codes: 0 = every device answered, 1 = at least one failed, 2 = setup error. For `route <ip>`: 0 = found somewhere, 1 = found nowhere.
 - Even with masking, quote only the config lines that answer the question.
 
-## Cisco Meraki
-
-**Always use `meraki_helper.py` for Meraki.** Don't write ad-hoc `requests` calls. It reads the API key from Vault (`vault_helper.get_secret("meraki_api")`), uses the LCMC Health org (ID **793109**, the only org the key can access) by default, follows pagination, adjusts `perPage` to each endpoint's limit, and retries on `429` and `502/503/504`. It only sends `GET` requests. Live Tools (ping, cable test, blink and so on) need `POST`, so they are out of scope. **Secrets are masked** (`*****`) in every command's output, `--json` and `get` included: PSKs, RADIUS and VPN secrets, SNMP communities, passwords and license keys.
-
-Command line (`python meraki_helper.py <command> --help` lists each command's options):
-
-```
-# Inventory and status
-python meraki_helper.py sites                              # every network: device count, online count, types, tags
-python meraki_helper.py devices --network PUC_Kenner [--type switch]   # devices + status, LAN/public IP, last reported
-python meraki_helper.py aps [--network PUC_Kenner]         # access points + status and tags
-python meraki_helper.py offline [--network X]              # every device whose status is not online
-python meraki_helper.py device "Kenner MX85"               # one device by name, serial or MAC: model, firmware, IPs, address, mgmt interface
-python meraki_helper.py inventory --unused [--type wireless]   # claimed hardware not in any network (spares)
-python meraki_helper.py licenses [--coterm [--all]]        # subscriptions, status, end dates, seats per SKU
-python meraki_helper.py firmware [--by-network] [--by-model] [--network X]   # firmware versions in use
-python meraki_helper.py firmware --scheduled | --history   # scheduled/in-progress or completed/canceled upgrades
-python meraki_helper.py availability --hours 72 [--summary] [--network X] [--type wireless]   # online/offline flaps
-
-# Clients
-python meraki_helper.py clients --network PUC_Kenner [--hours 24] [--ssid DATA] [--vlan 2] [--search dell] [--sort usage]
-python meraki_helper.py client 00:11:22:33:44:55           # org-wide MAC search: every network that has seen it
-python meraki_helper.py client 10.187.5.95 --network PUC   # IP or name: scans client lists (all networks if no --network; slow)
-python meraki_helper.py client <mac> --detail              # adds wireless connection stats
-python meraki_helper.py top clients|apps|ssids|devices|models|networks [--hours 24] [--limit 10]
-
-# Wireless
-python meraki_helper.py ssids [--by-network] [--network PUC]   # enabled SSIDs: networks, APs broadcasting/online, auth mode
-python meraki_helper.py ssid LCMC-DATA [--network PUC] [--full]   # one SSID's config per network (RADIUS, VLAN, scope); --full adds firewall/shaping/splash
-python meraki_helper.py rf-profiles [--network X]
-python meraki_helper.py wifi-health --network PUC_Kenner [--hours 24]   # failures by step (assoc/auth/dhcp/dns), per AP, channel utilization
-python meraki_helper.py air-marshal --network PUC_Kenner [--wired]      # rogue/neighbor SSIDs; --wired = also seen on the LAN
-python meraki_helper.py ap-ports [--network X]             # AP uplink: power source, PoE standard, speed, duplex
-
-# Appliance (MX/Z3), WAN and VPN
-python meraki_helper.py uplinks [--network X] [--loss] [--down]   # WAN1/WAN2/cellular status, IPs, gateway, DNS; --loss adds 5-min loss/latency
-python meraki_helper.py vpn [--network X] [--down]         # AutoVPN: peers, unreachable peers, exported subnets
-python meraki_helper.py vpn --config [--network X]         # site-to-site mode, hubs, subnets in VPN
-python meraki_helper.py vpn --third-party                  # third-party IPsec peers
-python meraki_helper.py vlans [--network X]                # VLAN id, name, subnet, MX IP, DHCP mode (all MX networks if no --network)
-python meraki_helper.py routes [--network X]               # MX static routes
-python meraki_helper.py firewall --network X [--kind l3|l7|inbound|portfwd|nat|nat-many]
-python meraki_helper.py security --network X               # content filtering, IDS/IPS, AMP settings
-python meraki_helper.py security --events [--network X] [--hours 24] [--limit 100]   # IDS/AMP events
-python meraki_helper.py sdwan --network X                  # uplink selection, bandwidth limits, traffic shaping
-python meraki_helper.py appliance --network X              # MX perf score, LAN ports, DHCP subnet usage, warm spare, settings
-
-# Switches (MS)
-python meraki_helper.py ports "Kenner MS130" [--port 12] [--connected] [--errors]   # port config + live status, PoE, LLDP/CDP neighbor
-python meraki_helper.py ports --network PUC_Kenner [--errors]    # every switch in the network
-python meraki_helper.py switch --network X [--kind stacks|stp|access-policies|dhcp-policy|acl|qos|mtu|settings|interfaces|routes]
-
-# Topology, events, audit
-python meraki_helper.py neighbors "Kenner MS130"           # LLDP/CDP neighbors per port
-python meraki_helper.py neighbors --network PUC_Kenner     # L2 topology links of a network
-python meraki_helper.py events --network X [--product wireless] [--type association] [--device NAME] [--client MAC] [--limit 100]
-python meraki_helper.py alerts [--network X] [--severity critical] [--all]   # assurance alerts (active by default)
-python meraki_helper.py changes [--hours 168] [--network X] [--admin name]   # Dashboard config change log (who changed what)
-python meraki_helper.py admins                             # Dashboard admins, access level, 2FA, last active
-python meraki_helper.py settings --network X               # network, syslog, SNMP, alerts, group policies, NetFlow, firmware
-
-# Anything else
-python meraki_helper.py get organizations/{org}/appliance/vpn/statuses
-python meraki_helper.py get networks/<networkId>/clients -p timespan=3600
-python meraki_helper.py get organizations/{org}/devices -p "serials[]=A" -p "serials[]=B" --one-page
-```
-
-- Every command takes `--json` (full records) and `-o FILE` (also write the output to a file; `--append` adds to it). `get` always prints JSON.
-- `{org}` in a path is replaced with the org ID. Write paths **without a leading slash**, because Git Bash rewrites `/organizations/...` into a Windows path.
-- `--network`: commands that work on one network (`clients`, `firewall`, `events`, `wifi-health` and so on) take an exact name or a unique substring, and the error lists the matches if there are several. Commands that loop over networks (`vlans`, `routes`, `vpn`, `ssid`, `rf-profiles`, `firmware`, `client`) take an exact name, or else run on every network whose name contains the text.
-- Wherever a device is needed, a device name, serial or MAC works (exact name, else a unique substring).
-- Device status is one of `online`, `alerting`, `offline` or `dormant`.
-- Notes from testing (2026-10-12): the org uses **subscription licensing**, so `licenses/overview` returns 400 and `licenses` reads the subscriptions instead. Networks bound to a template (e.g. `PUC_*`) return 400 for `appliance/trafficShaping`, and `sdwan` shows that as an error section. `changes` returns one page of up to 5000 changes, newest first. `events` asks each product type in the network separately and merges the results. `clients` shows usage in MB, converted from the API's KB. `top` shows usage in MB, as the API reports it.
-- To follow up on a client, take its MAC to ISE (`ise_helper.py auth <mac>`) or Ordr (`ordr_helper.py device <mac>`). To compare MX subnets with NetBox, run `vlans`, then `netbox_helper.py prefix <ip>`.
-
-In Python, for anything the CLI doesn't cover:
-
-```python
-from meraki_helper import Meraki, mask
-
-m = Meraki()
-net = m.network_by_name("PUC_Kenner"); dev = m.device_by_name("Kenner MX85")
-m.networks(); m.networks_matching("PUC", "wireless"); m.devices(); m.device_statuses(); m.inventory(usedState="unused")
-m.uplink_statuses(); m.uplink_loss_latency(); m.vpn_statuses(); m.third_party_vpn_peers(); m.sites(); m.subscriptions()
-m.clients(net["id"], timespan=3600); m.client_search("00:11:22:33:44:55"); m.vlans(net["id"]); m.static_routes(net["id"])
-m.ssids(net["id"]); m.ssid_usage(); m.switch_ports(serial); m.switch_port_statuses(serial); m.lldp_cdp(serial)
-m.events(net["id"], "wireless"); m.config_changes(timespan=86400); m.assurance_alerts(active="true"); m.admins()
-m.availability_changes(timespan=86400); m.firmware_upgrades(); m.security_events(86400); m.top("clients/byUsage")
-m.get_all("networks/{id}/appliance/firewall/l3FirewallRules")  # any list endpoint
-m.get("devices/{serial}"); m.try_get(path)                    # one object; try_get returns {"error": ...} instead of raising
-print(mask(data))                                             # mask secrets before printing anything yourself
-```
-
-How sites are named in Meraki (79 networks): `CHMPC *` = Children's clinics, `LRPG *` = Tulane/LRPG clinics, `PUC_*` = urgent care, `CC_*` = Community Connect partners (single Z3/MX), `* GUEST Internet` = hospital guest MXs, `UMC Concentrator` / `UMC ACB Concentrator` = VPN concentrators.
-
-Summarize the results for the user. Show raw JSON only when they ask for it. The `meraki` SDK is not installed and isn't needed.
-
-## Ordr
-
-Use Ordr for questions about what an endpoint **is**: device identity and classification (group, profile, manufacturer, model, OS), risk, security alarms, vulnerabilities, where a device sits on the network, and its flows and applications. It is especially useful for medical and IoT devices. Use Meraki for Meraki network and client state, and `cisco_helper.py route` for routing.
-
-**Always use `ordr_helper.py` for Ordr.** Don't write ad-hoc `requests` calls. It reads `ORDR_URL`, `ORDR_USER`, `ORDR_PASSWORD` and `ORDR_TENANTGUID` from Vault in one call (`vault_helper.get_secret_values()`), uses HTTP basic auth, adds `tenantGuid` to every request (the API requires it), follows `MetaData.next` pagination, and retries on `429`. It only sends `GET` requests.
-
-Command line (start with these):
-
-```
-python ordr_helper.py device 00:11:22:33:44:55         # by MAC (any format), IP, or device name
-python ordr_helper.py device 10.158.10.25 --include connectivity-info   # switch/port/AP details
-python ordr_helper.py devices --profile "<profile>" --limit 50
-python ordr_helper.py devices --group "<group>" --risk High
-python ordr_helper.py devices --conn-status ONLINE_IN_LAST_24_HRS --limit 0   # 0 = all
-python ordr_helper.py alarms --severity high --limit 20
-python ordr_helper.py alarms --mac 00:11:22:33:44:55
-python ordr_helper.py vulns --ip 10.158.10.25
-python ordr_helper.py summary                          # alarm + vulnerability summaries
-python ordr_helper.py reports medical                  # list report names containing "medical" (no login needed)
-python ordr_helper.py report high-risk-devices
-python ordr_helper.py get Rest/Locations
-python ordr_helper.py get Rest/Devices -p mfg=Philips --all
-```
-
-- `devices`, `alarms` and `vulns` return 100 rows by default. Use `--limit 0` for everything, but that can be slow for all devices.
-- Add `--json` to `device`, `devices`, `alarms` or `vulns` to get every field. The table shows only the main columns. `summary`, `report`, `locations` and `get` always print JSON.
-- `devices` filters match the API query parameters. For others, use `get Rest/Devices -p <param>=<value>`. Examples: `os-type`, `serial`, `vulnIds`, `appName`, `sensorName`, `include=clinical-info`, `openPorts=true`, `weakPassword=true`.
-- Useful device fields: `MacAddress`, `IpAddress`, `dhcpHostname`, `Group`, `Profile`, `MfgName`, `ModelNameNo`, `OsType`, `Vlan`, `RiskState`, `riskScore`, `connStatus`, `deviceLocation`, `nwEquipHostname`, `nwEquipInterface`, `essid`, `hasPhi`, `fdaClass`, `firstSeen`, `lastSeen`.
-- **Reports don't work on this tenant.** The spec lists about 290 reports (`Rest/Reports/...`, browse them with `reports <text>`), but as of 2026-10 every one returns `400 Unknown report`. Build the answer from `devices`, `alarms` and `vulns` instead, for example by counting devices by `Group`, `Profile` or `RiskState`.
-- Paging is verified: `--limit N` asks Ordr for up to N per page and follows `MetaData.next` (`clientMacToken`) until N rows are collected.
-- Name lookups (`device <name>`) match the short hostname in any case, so `uws-dt5-lan046` works and the helper strips any domain. They are slow, about a minute, so prefer MAC or IP when you have one. One name can return several devices, for example wired and wireless NICs.
-- MAC filters are case-sensitive in Ordr (uppercase only). The helper normalizes MACs for you, so use it rather than raw `get`. A device that isn't found returns an empty list.
-- Severity: the `severity-level` filter takes lowercase values (`normal`, `low`, `medium`, `high`, `critical`), but results show them in uppercase (`HIGH`). Alarm categories look like `KNOWN_VULN_CONFIRMED_HIGH`.
-- API reference: https://api.ordr.net/api-docs/index.html (spec: https://api.ordr.net/api-docs/OrdrRestAPI.json).
-
-In Python:
-
-```python
-from ordr_helper import Ordr
-
-o = Ordr()
-o.device("00:11:22:33:44:55")                          # list of matching devices
-o.devices(max_items=50, group="<group>", riskState="High")
-o.alarms(max_items=20, **{"severity-level": "high"})
-o.vulnerabilities(ip="10.158.10.25")
-o.alarm_summary(); o.vulnerability_summary(); o.locations(); o.profiles()
-o.applications(mac="00:11:22:33:44:55"); o.flows(srcIp="10.158.10.25")
-o.report("24-hour/device-count-by-type")
-o.get("Rest/Devices", mac="00:11:22:33:44:55"); o.get_all("Rest/Devices", max_items=500, mfg="Philips")
-```
-
-Summarize the results for the user. Show raw JSON only when they ask for it. Device records can include patient-related fields (`hasPhi`, clinical info), so only include those when they're relevant to the question.
-
-## Cisco Catalyst Center
-
-Use Catalyst Center (formerly DNA Center) for questions about **managed network devices and assurance**: the inventory of switches, routers, WLCs and APs (hostname, management IP, model, software version, serial, reachability, uptime), device interfaces, the running config Catalyst Center has collected, the site hierarchy, site and device health, assurance issues, and client details such as where a MAC is connected. ISE covers authentication, Ordr covers what an endpoint is, Meraki covers Meraki networks, and `cisco_helper.py route` gives live routing from the WAN routers.
-
-**Always use `catalyst_helper.py` for Catalyst Center.** Don't write ad-hoc `requests` calls. It reads `cat_url`, `cat_user` and `cat_password` from Vault in one call. It gets an auth token (`POST /dna/system/api/v1/auth/token`, the only non-GET call it makes), sends it as `X-Auth-Token`, refreshes it on 401 (tokens last about an hour), pages with `offset` (starting at 1) and `limit` (max 500), and retries on 429. Paths without a `dna/` prefix are treated as relative to `dna/intent/api/v1/`.
-
-Command line (start with these):
-
-```
-python catalyst_helper.py count                              # devices in inventory
-python catalyst_helper.py devices --family "Switches and Hubs" --limit 50   # family must be the exact name
-python catalyst_helper.py devices --hostname "TLS-.*"        # case-sensitive; .* wildcards work
-python catalyst_helper.py devices --reachability Unreachable
-python catalyst_helper.py device tls-wan-rtr-01              # by hostname, management IP, serial or id
-python catalyst_helper.py interfaces 10.158.136.51           # interfaces of one device
-python catalyst_helper.py config tls-wan-rtr-01              # running config as collected by Catalyst Center
-python catalyst_helper.py client 00:11:22:33:44:55           # connected AP/switch + interface, IP, SSID, VLAN, health
-python catalyst_helper.py sites [--name Global/UMC]
-python catalyst_helper.py health                             # site health
-python catalyst_helper.py device-health --health POOR
-python catalyst_helper.py issues --priority P1               # active assurance issues
-python catalyst_helper.py get network-device/count           # any Intent API path
-python catalyst_helper.py get network-device -p family=Switches --all
-```
-
-- **Hostname filters are case-sensitive**, and only `.*` wildcards work (no `(?i)` or `[Aa]`). LCMC hostnames are mostly uppercase, and some include the domain (`TLS-WAN-RTR-01.lcmchealth.org`, `TLS-WAN-DIS-01`), so use uppercase in `--hostname` filters, e.g. `"TLS-.*"`. `device <name>` handles this for you: it tries the name as typed, in uppercase and in lowercase, exact then with `.*`, and then falls back to serial number. Commands that need exactly one device (`interfaces`, `config`) fail and list the matches if the name is ambiguous.
-- `devices` filters: `--hostname`, `--family` (e.g. `Switches and Hubs`, `Routers`, `Wireless Controller`, `Unified AP`), `--role`, `--platform`, `--version`, `--reachability`, `--location`. For other filters, use `get network-device -p <param>=<value>`.
-- Add `--json` for full records. `config` and `get` always print raw output.
-- `client <mac>` uses the assurance data API (`dna/data/api/v1/clients`) and takes a MAC in any format. It prints `null` when Catalyst Center has no assurance data for the client. That's common for wired PCs. In that case, try Meraki, or Ordr's `device <mac> --include connectivity-info`. Assurance sees about 18,000 clients, mostly wireless.
-- `config` returns a full running config, which includes credential hashes and keys. Read it to answer questions, but only quote the relevant lines, and never repeat secrets, keys or hashes from it.
-- Catalyst Center is `ej-dnac-01.lcmchealth.org`, with about 4,775 devices and 80 sites (tested 2026-10-09) (certificate also valid for `dnac.lcmchealth.org`). **TLS:** its certificate is issued by `EPIC-ICA02` under LCMC's root `EPIC-CA`, the same root as ISE. See "LCMC internal CA" under Setup.
-
-In Python:
-
-```python
-from catalyst_helper import Catalyst
-
-cc = Catalyst()
-cc.device_count(); cc.devices(max_items=100, family="Switches and Hubs"); cc.device("tls-wan-rtr-01")
-cc.interfaces("10.158.136.51"); cc.interface_by_ip("10.143.100.18"); cc.device_config("tls-wan-rtr-01")
-cc.client("00:11:22:33:44:55"); cc.clients(max_items=100, type="Wireless"); cc.client_health()
-cc.sites(); cc.site_health(); cc.device_health(health="POOR"); cc.issues(priority="P1", issueStatus="ACTIVE")
-cc.get("network-device/count"); cc.get_all("network-device", max_items=1000, platformId="C9300-48P")
-```
-
-Summarize the results for the user. Show raw JSON only when they ask for it.
-
-## Cisco ISE
-
-Use ISE for questions about **network access**: where a MAC, IP or user is authenticated right now (switch, port or WLC/AP), how it authenticated (802.1X or MAB, which policy, which authorization profile, VLAN or SGT), its endpoint profile and identity group, its recent auth failures, and which network devices (NADs) are defined in ISE. Ordr answers what a device *is*, Meraki covers Meraki networks, and `cisco_helper.py route` covers routing.
-
-**Always use `ise_helper.py` for ISE.** Don't write ad-hoc `requests` calls. It reads `ise_url`, `ise_user` and `ise_password` from Vault in one call. ISE is `umc-ise-pan-01.lcmchealth.org` (the PAN).
-
-Deployment (from `nodes`): PAN `UMC-ISE-PAN-01` (primary) and `EJ-ISE-PAN-02`, dedicated MnT nodes `UMC-ISE-MNT-01` (primary) and `EJ-ISE-MNT-02`, and PSNs `UMC-ISE-PSN-01` and `EJ-ISE-PSN-02`. ERS and OpenAPI go to the PAN in `ise_url`. **MnT calls go to the primary MnT node**, which the helper finds from the node list (override it with `ISE_MNT_HOST`).
-
-**Status (tested 2026-10-09):** all three APIs work. MnT access was granted to the `ise_user` account the same day.
-
-MnT quirks the helper handles for you:
-- ISE answers "no session" with HTTP 500 (cpm-code 34110), not 404. `session` returns `null` in that case.
-- ISE's `Session/IPAddress` lookup fails even for live sessions, so `session <ip>` finds the IP in the active-session list (`framed_ip_address`) and then looks up that MAC. An IP lookup can therefore only find sessions in the active list.
-- The active list is small (97 sessions when tested), because it only holds sessions that have RADIUS accounting. If `session` returns `null`, run `auth <mac>`. It still shows recent authentications, with the WLC or switch, port type, identity group and pass/fail.
-
-| API | Base URL | Used for | Format |
-|---|---|---|---|
-| ERS | `https://<ise>:9060/ers/config/` | Config objects: endpoints, network devices, endpoint and identity groups, SGTs, authorization profiles | JSON. Follows `nextPage`, 100 results per page |
-| MnT | `https://<ise>/admin/API/mnt/` | Live sessions, active count and list, recent authentications | XML, which the helper converts to dicts |
-| OpenAPI | `https://<ise>/api/v1/` | Deployment nodes, policy sets | JSON |
-
-Command line (start with these):
-
-```
-python ise_helper.py lookup 0011.2233.4455            # endpoint record + live session for a MAC (any format)
-python ise_helper.py session 10.158.10.25             # live session by MAC, IP or username
-python ise_helper.py auth 00:11:22:33:44:55 --hours 24   # recent authentications (max 120 h)
-python ise_helper.py active --count                   # number of active sessions
-python ise_helper.py active --protocols               # active sessions by auth protocol (EAP-TLS, PEAP...) and method (dot1x/mab)
-python ise_helper.py active --limit 20                # sample of active sessions
-python ise_helper.py nad 10.158.136.51                # network device by IP, or name substring
-python ise_helper.py nads --name wan                  # list NADs (id, name)
-python ise_helper.py groups                           # endpoint identity groups
-python ise_helper.py nodes                            # deployment nodes and roles
-python ise_helper.py policy-sets [--device-admin]
-python ise_helper.py ers sgt                          # any ERS resource; -f name.CONTAINS.x ; --id <uuid>
-python ise_helper.py mnt Session/ActiveCount          # any MnT path
-python ise_helper.py api deployment/node              # any OpenAPI path
-```
-
-- `session`, `lookup` and `auth` show only the key fields by default: user, MAC, IP, NAD name and IP, port, endpoint profile, identity group, authorization profile, auth method and protocol, posture, SGT, PSN and timestamp. Add `--json` for everything.
-- `session` returns `null` when the endpoint has no active session. Use `auth` to see recent attempts, including failures.
-- ERS filters use the form `<field>.<OP>.<value>`, where OP is EQ, NEQ, CONTAINS, STARTSW and so on. Examples: `mac.EQ.AA:BB:CC:DD:EE:FF`, `name.CONTAINS.wan`, `ipaddress.EQ.10.1.1.1`.
-- The ISE account needs ERS Admin or Operator rights for ERS, and MnT access for sessions. A 403 means the account lacks the right role. A connection error on port 9060 means ERS is disabled.
-
-**TLS:** ISE's certificate is issued by `EPIC-ICA01` under LCMC's root `EPIC-CA`. See "LCMC internal CA" under Setup.
-
-In Python:
-
-```python
-from ise_helper import ISE
-
-ise = ISE()
-ise.lookup("00:11:22:33:44:55")          # {"endpoint": {...ERS...}, "session": {...MnT...}}
-ise.session("10.158.10.25"); ise.auth_status("00:11:22:33:44:55", hours=24, records=10)
-ise.active_count(); ise.active_sessions(max_items=50)
-ise.network_device("tls-wan-rtr-01"); ise.network_devices(name_contains="wan")
-ise.endpoint_groups(); ise.identity_groups(); ise.sgts(); ise.authorization_profiles()
-ise.nodes(); ise.policy_sets()
-ise.ers_search("internaluser", filter="name.STARTSW.svc"); ise.ers_get("endpoint", "<id>")
-ise.mnt("Session/ActiveCount"); ise.api("deployment/node")
-```
-
-Summarize the results for the user. Show raw JSON only when they ask for it.
-
-## Cisco CDO (cloud-delivered FMC)
-
-Use CDO for **firewall policy and config** on the FTDs it manages: devices, HA pairs, interfaces, static routes, network objects, and prefilter policies and rules. Use `ftd_capture_helper.py` to see what the firewall *actually does* with live traffic.
-
-**Always use `cdo_helper.py` for CDO.** Don't write ad-hoc `requests` calls. It sends only `GET` requests, pages with `limit`/`offset`, and retries on `429`, because FMC allows about 120 requests a minute.
-
-**Settings (an exception to "credentials come from Vault"):**
-- `CDO_URL`: the tenant URL. It's in `.env`, because it isn't a secret.
-- `CDO_UUID` (the FMC domain UUID) and `CDO_API` (the bearer token): **environment variables**. Never put them in `.env` or any file, and never print them.
-- The helper exits if any of the three is missing.
-
-```
-python cdo_helper.py devices                       # managed FTDs: model, version, health, device group
-python cdo_helper.py ha                            # FTD HA pairs
-python cdo_helper.py interfaces <device>           # all interfaces: nameif, IP, security zone
-python cdo_helper.py routes <device>               # IPv4 static routes
-python cdo_helper.py objects <name-or-value>       # network objects
-python cdo_helper.py prefilter-rules [--policy NAME]   # rules in order (default Vendor-Prefilter-Policy)
-python cdo_helper.py prefilter-check --src <ip|cidr|a-b> --dst <ip|cidr|a-b> --ports 443,tcp/22,udp/1194,8000-8010,icmp
-python cdo_helper.py prefilter-check --input <file> [--summary]   # pasted CSV / spreadsheet rows
-python cdo_helper.py get object/networkgroups -p expanded=true    # any GET path under the domain
-```
-
-### Rule lookup ("does a rule already allow this?")
-
-The user gives a source, a destination and one or more destination ports. `prefilter-check` searches `Vendor-Prefilter-Policy` (use `--policy` for another) and reports whether an existing **enabled** rule already allows the traffic. It is read-only and never creates or changes rules. Report only what would need to change. It takes about 12 seconds.
-
-- **Ports:** `443` (TCP), `tcp/443`, `udp/53`, `any/443` (any protocol), `8000-8010` (a TCP range) and `icmp`. Without `--ports`, it lists every rule whose source and destination match, including disabled and BLOCK rules (both flagged), with each rule's ports.
-- **Matching:**
-  - Only enabled rules count.
-  - `FASTPATH` and `ANALYZE` allow traffic. A matching `BLOCK` denies it.
-  - Rules are evaluated top-down by `metadata.ruleIndex`, and the first match wins.
-  - A rule matches only if its object **fully contains** the requested network. Rules that cover only part of it are listed under "PARTIAL IP OVERLAP".
-  - Empty networks or ports on a rule mean any.
-  - FQDN objects can't be checked against an IP and are flagged.
-  - Interfaces aren't part of the match, but they're reported.
-- **Pasted CSV / spreadsheet rows** have three columns (source, destination, ports). Cells are often quoted, span several lines and mix labels with values. Save the text to a scratchpad file exactly as pasted and use `--input`. The parser:
-  - splits on tabs, then commas, and falls back to cells taken three at a time;
-  - folds an optional 4th protocol column into the ports;
-  - pulls every IP, CIDR and range out of the text (`10.194.23.197-200` expands to a full range);
-  - reads ports line by line, applying a `TCP`/`UDP` on a line to every port on it, and defaults to TCP;
-  - checks every source × destination pair.
-- **What to report:**
-  - Which rule and object covers each destination and port.
-  - Which ports are **MISSING**, with the port objects on the closest matching rule. Point out an object that has the right numbers but the wrong protocol.
-  - What to change: add a port object to an existing rule (preferred), change a shared object (warn that this affects other rules), or create a new rule.
-  - Present it as a short summary, then a table per matching rule.
-
-## FTD packet captures
-
-`ftd_capture_helper.py` runs packet captures over SSH on the FTD firewalls listed in `.env`. It's the **only write action** allowed in this repo, and it may only create, start, stop and remove packet captures. Everything else stays read-only.
-
-**Which firewalls:** only the units in `FTD_CAPTURE_HOSTS` in `.env`. The helper refuses to connect to anything else.
-- **Format:** units of one HA pair are separated by commas, and firewalls are separated by semicolons. A unit can carry an optional label, as `ip=name`. For example: `FTD_CAPTURE_HOSTS=<unit1-ip>=NAME-01,<unit2-ip>=NAME-02;<other-pair-ip1>,<other-pair-ip2>`.
-- **Choosing a firewall:** with more than one configured, pass `--fw <ip or label>`.
-- **Standalone firewall:** a group with one IP is a standalone unit. It must report failover Off.
-- **Adding a firewall:** add its IPs to `FTD_CAPTURE_HOSTS`. Never hard-code unit IPs in tracked files, because the repo is public.
-- **Currently configured:** the `UMC-FTD-2130-VENDOR-HA` pair (Firepower 2130, FTD 7.4.4). On 2026-10-12 the Secondary (`-02`) was Active. Never assume this; the helper checks every time.
-
-**Credentials:** the environment variables `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` (not Vault, not `.env`). Never hard-code, print or log them, and never ask the user to paste a password into the chat.
-
-**Connecting:** netmiko with `device_type="cisco_ftd"` and generous timeouts, because some units are slow to show the prompt. The netmiko session log is off, since it would record the login. The helper stays at the `>` CLISH prompt and never enters `expert` mode or `configure`.
-
-### Rules
-
-1. **Active unit only.** Before every capture, the helper runs `show failover` on both units of the pair. It continues only if exactly one unit is `Active` and the other is `Standby Ready`, and it captures on the active unit only. If the state is unclear (both or neither active, a unit unreachable, or failover not `On`), **don't capture**. Show the user the output and stop.
-2. **Confirm first.** Before starting a capture, show the plan (`start` or `capture` **without** `--yes`) and wait for a yes for that specific capture: the active unit and IP, the `nameif`s, the match filter, the buffer and the exact commands. Approval for one capture doesn't carry over to the next. **Exception:** when the user asks whether specific traffic is allowed (below), the request plus their interface choices count as approval.
-3. **Always filter and limit.** Every capture has a `match` with a source and a destination, plus a `buffer` (default 1 MB, at most 32 MB), and never uses `circular-buffer`. Trace captures set `trace-count` (default 20, at most 100). `asp-drop` captures also need a `match`.
-4. **Reuse before creating.** If an existing capture (anyone's) already has the required settings, it's used instead of a new one. A stopped one is started with `no capture <name> stop` and stopped again when finished. A running one is left running. Tell the user which existing capture is being used.
-5. **Naming.** Every capture Claude creates is named `CLAUDE_<DESC>_<IN|OUT|DROP>`. `DESC` comes from the protocol, port and destination, or from `--name`, and is at most 20 characters. The helper checks for name clashes.
-6. **Clean up.** When done, the output is saved under `captures/` (git-ignored) and the `CLAUDE_*` captures are removed. Only ever remove `CLAUDE_*` captures. Never remove, clear or reconfigure anyone else's; the only thing allowed on them is starting and stopping them (rule 4). After an interrupted session, check for leftover `CLAUDE_*` captures (`cleanup`) and offer to remove them.
-7. **Allowed commands only:** `show ...`, `capture CLAUDE_* ...`, `no capture CLAUDE_*`, and `capture <name> stop` / `no capture <name> stop`. Never config changes, `clear`, failover commands, `reload` or `copy`. The helper enforces this with an allowlist.
-8. **No packet-tracer.** It doesn't evaluate prefilter rules, so its verdict is wrong for `Vendor-Prefilter-Policy` traffic. Verdicts come only from live trace captures.
-
-```
-python ftd_capture_helper.py status                               # failover state of the units
-python ftd_capture_helper.py interfaces [--src <ip> --dst <ip>] [--refresh]   # cached nameifs; marks route-suggested ones
-python ftd_capture_helper.py list                                 # all captures on the active unit
-python ftd_capture_helper.py start --src <ip|cidr> --dst <ip|cidr> [--proto tcp|udp|icmp|ip] [--port 53|8000-8010] \
-       --ingress <nameif> --egress <nameif> [--name <DESC>] [--buffer 1048576] [--trace-count 20]   # PLAN only
-python ftd_capture_helper.py start ... --yes                      # create / reuse captures and leave them RUNNING
-python ftd_capture_helper.py check [--name <DESC>]                # allowed or denied, and by which rule (read-only)
-python ftd_capture_helper.py stop  [--name <DESC>] [--stop-only]  # remove new captures (or just stop them), re-stop reused ones
-python ftd_capture_helper.py sessions                             # open sessions
-python ftd_capture_helper.py capture ... --ingress X --egress Y [--duration 60] [--yes] [--keep]   # one-shot
-python ftd_capture_helper.py cleanup [--yes]                      # leftover CLAUDE_* captures
-```
-
-**Sessions and output:**
-- `start` records the session in `captures/sessions.json`: the firewall, active unit, capture names, what was reused or started, and each capture's packet count at the start.
-- `check` analyses only the packets added since `start`. Capture timestamps aren't used, because they don't match `show time`.
-- If a failover happened since `start`, `check` and `stop` stop and say so.
-- Interface lists are cached per firewall in `ftd_interfaces.json` (git-ignored) for 7 days.
-
-### Is this traffic allowed?
-
-When the user asks whether specific traffic is allowed (for example "is 10.1.1.1 to 10.9.9.9 on udp 53 allowed?"):
-
-1. **Choose interfaces.** Run `ftd_capture_helper.py interfaces --src <src> --dst <dst>` and show the table. Ask for the **source (ingress)** and **destination (egress)** interfaces with `AskUserQuestion`: two questions, with the route-suggested interface first and marked "(Recommended)". Never pick them for the user.
-2. **Start the capture.** Run `start ... --ingress <src-if> --egress <dst-if>`, then the same with `--yes` (the request is the approval). Show the plan, the captures created and any `USING EXISTING CAPTURE` lines. If no protocol was given, use `tcp`.
-3. **Check the policy.** Also run `cdo_helper.py prefilter-check` for the same source, destination and port. It shows which rule *should* match.
-4. **Ask exactly: "do you want me to check for traffic?"**, then wait. The user may need time to generate the traffic.
-5. **If yes,** run `check --name <DESC>`. Report **ALLOWED / DENIED / NOT SEEN / UNCLEAR**, the matched `RULE:` line compared with `prefilter-check`, and the drop reason if it was denied. If the result is NOT SEEN, offer to check again later.
-6. **Ask whether to disable the capture** (`AskUserQuestion`): "Yes, remove it (Recommended)" runs `stop`, "Stop it but keep it" runs `stop --stop-only`, and "No, leave it running" does nothing, but remind the user that `sessions` lists it. Ask this after the check, and also if the user says no to checking.
-
-For a plain capture request (not "is it allowed?"), choose interfaces the same way, show the `capture ...` plan **without** `--yes`, and run it with `--yes` only after the user approves.
-
-**Verdicts:**
-
-| What the captures show | Verdict |
-|---|---|
-| `_IN` trace `Action: allow`, packets in `_OUT`, and a reply | **ALLOWED**, and the destination replied |
-| `_IN` trace `Action: allow`, packets in `_OUT`, no reply | **ALLOWED by the firewall, no reply.** The problem is past it (server, host firewall or return routing) |
-| `_IN` trace `Action: drop`, or the flow is in `_DROP` | **DENIED.** Report the drop reason (`acl-drop`, `no-route`, `rpf-violated`, ...) |
-| Nothing in `_IN` | **NOT SEEN.** The traffic never reached the firewall, or wasn't generated during the capture |
-| Seen on `_IN`, not `_OUT`, no drops | **UNCLEAR.** Review the saved output |
-
-`Vendor-Prefilter-Policy` rules use FASTPATH, so allowed traffic should show the prefilter rule and fastpath. A capture only sees traffic sent **while it runs**, so ask the user to generate it.
-
-**FTD CLI quirks the helper handles:**
-- `show capture` can list names as `NAME%intf=<nameif>%`. The suffix is part of the real name.
-- There's no `show clock`; use `show time`.
-- When the CLI rejects a command, it leaves the text on the line, so the helper clears the line with Ctrl+U and stops.
-- Long `capture` commands wrap on the terminal, so they're sent without echo verification and then confirmed with `show capture`.
-- A reused capture whose packet count doesn't move gives no data. Prefer a new `CLAUDE_` capture in that case.
+## Other systems (skills)
+
+The detailed guide for each of these lives in a project skill under `.claude/skills/`, which loads when the question needs it. The safety rules for all of them are in "Rules" below.
+
+| Skill | Helper | Use it for |
+|---|---|---|
+| `meraki` | `meraki_helper.py` | Meraki networks, devices, APs, clients, SSIDs, wireless health, MX WAN/VPN/VLANs/firewall, MS ports, events, change log |
+| `ordr` | `ordr_helper.py` | What an endpoint is: identity, profile, risk, alarms, vulnerabilities (first stop for a non-Cisco device) |
+| `catalyst-center` | `catalyst_helper.py` | Managed device inventory and assurance: health, issues, configs, where a client MAC is connected |
+| `ise` | `ise_helper.py` | Authentication: where and how a MAC/IP/user authenticated, failures, NADs, policy sets |
+| `cdo-firewall-policy` | `cdo_helper.py` | FTD config and policy: does a prefilter/access rule allow this, NAT, interfaces, routes, objects |
+| `ftd-packet-captures` | `ftd_capture_helper.py` | Live "is this traffic allowed?" captures on the FTDs (the only write action) |
+| `network-reports` | `endpoint_helper.py`, `audit_helper.py`, `report_helper.py` | `whois` an IP/MAC, `path` between two IPs through the firewalls, NetBox drift audits, the daily health brief |
 
 ## Vault login
 
@@ -584,16 +224,16 @@ Known problem: `claim "samaccountname" not found in token` means the account use
 - ISE is **read-only**: go through `ise_helper.py`, which only sends `GET` requests. Never `POST`, `PUT` or `DELETE` to ERS or OpenAPI, and never send CoA, reauthenticate or disconnect requests through MnT (`/admin/API/mnt/CoA/...`). Those change live network access. The only exception is when the user explicitly asks for that specific change and confirms it.
 - Ordr is **read-only**: go through `ordr_helper.py`, which only sends `GET` requests. Never call the Ordr write endpoints (`POST /Rest/SecurityAlarm/StateChange` clears alarms, `POST /Rest/SecurityAlarms/mute` mutes them, and so on for `Vulnerabilities/StateChange`, `UpdateAssetInfo`, `DeviceOnboard`, `UserLocations` and `UserRole`), unless the user explicitly asks for that specific change and confirms it.
 - Never put secrets in `.env`. Do not touch `.env.old`.
-- Only read-only `show` commands on the routers. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state. **The one exception** is `ftd_capture_helper.py`. It may create, start, stop and remove packet captures on the `FTD_CAPTURE_HOSTS` firewalls, under the rules in "FTD packet captures".
+- Only read-only `show` commands on the routers. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state. **The one exception** is `ftd_capture_helper.py`. It may create, start, stop and remove packet captures on the `FTD_CAPTURE_HOSTS` firewalls, under the rules in the `ftd-packet-captures` skill. Every change is logged to `captures/audit.log`.
 - CDO is **read-only**: go through `cdo_helper.py`, which only sends `GET` requests. Never `POST`, `PUT` or `DELETE` to the FMC API (that changes firewall policy), unless the user explicitly asks for that specific change and confirms it.
 - `CDO_UUID`, `CDO_API`, `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` are environment variables. Never print them, log them or write them to a file.
-- **No ad-hoc snippets.** Use the helpers (`netbox_helper.py`, `cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `cdo_helper.py`, `ftd_capture_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it. See "Ground rules" at the top.
+- **No ad-hoc snippets.** Use the helpers (`netbox_helper.py`, `cisco_helper.py`, `catalyst_helper.py`, `ise_helper.py`, `meraki_helper.py`, `ordr_helper.py`, `cdo_helper.py`, `ftd_capture_helper.py`, `endpoint_helper.py`, `audit_helper.py`, `report_helper.py`, `bgp_community.py`). If one can't do what's needed, extend that helper (and this file), test it, then use it. See "Ground rules" at the top.
 - **NetBox is the source of truth for inventory.** Look devices up there first.
 - Run show commands on devices only when the user asks for information from them. Keep to the devices the question needs.
 
 ## Adding a platform
 
-1. `netbox_helper.py`: add the NetBox platform slug to `PLATFORM_MAP`, mapped to a netmiko device_type. Unknown slugs fall back to `cisco_ios`, with a warning.
+1. `netbox_helper.py`: add the NetBox platform slug to `PLATFORM_MAP`, mapped to a netmiko device_type. Unknown slugs fall back to `cisco_ios`, with a warning. (AireOS WLCs, platform `airos`, map to `cisco_wlc_ssh`.)
 2. `cisco_helper.py`: if the platform's route command differs, add a branch in `route_command()`. If its "not found" text is new, add it to `ROUTE_NOT_FOUND`. For other commands, add a platform column or override in `COMMANDS`.
 
 ## Setup
@@ -602,7 +242,11 @@ Known problem: `claim "samaccountname" not found in token` means the account use
 python -m pip install -r requirements.txt
 vault version          # Vault CLI, already installed at C:\Program Files\vault\vault.exe
 python cisco_helper.py list
+git config core.hooksPath .githooks     # once per clone: the leak-guard pre-commit hook
+python -m pytest -q                     # offline tests; run them after changing a parser
 ```
+
+**Before committing:** the repo is public. The pre-commit hook refuses commits that contain internal addresses or secrets. Use placeholders in examples (`192.0.2.x`, `198.51.100.x`, `<vault-host>`). Never bypass it with `--no-verify`.
 
 If Vault or NetBox use an internal CA, `truststore` lets Python use the Windows certificate store. Otherwise set `VAULT_CACERT`.
 

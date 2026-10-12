@@ -5,13 +5,16 @@ Read-only network tools for LCMC Health. Each `*_helper.py` script covers one sy
 | Helper | System | Used for |
 |---|---|---|
 | `netbox_helper.py` | NetBox | **The inventory**: sites, devices, IPs and prefixes |
-| `cisco_helper.py` | Cisco devices over SSH | Show commands, route lookups, WLAN/SSID config |
+| `cisco_helper.py` | Cisco devices over SSH | Show commands, route lookups, IP-to-switchport trace (`locate`), wireless clients on WLCs (`wclient`), WLAN/SSID config |
 | `catalyst_helper.py` | Catalyst Center | Inventory sync, interfaces, clients, site and device health, issues |
 | `ise_helper.py` | Cisco ISE | Endpoints, sessions, authentications, network devices, policy sets |
-| `cdo_helper.py` | Cisco CDO / cdFMC | FTD devices, HA, interfaces, routes, prefilter rule checks |
+| `cdo_helper.py` | Cisco CDO / cdFMC | FTD devices, HA, interfaces, routes, assigned policies, prefilter / access-policy / NAT checks |
 | `ftd_capture_helper.py` | FTD over SSH | Packet captures on the active unit (the only write action) |
 | `meraki_helper.py` | Meraki Dashboard | Networks, devices, clients, SSIDs, wireless health, WAN/VPN, MX firewall and VLANs, switch ports, events, change log |
 | `ordr_helper.py` | Ordr | What an endpoint is: classification, risk, alarms, vulnerabilities |
+| `endpoint_helper.py` | All of the above | `whois` an IP or MAC (what and where), `path` between two IPs through the firewalls |
+| `audit_helper.py` | NetBox vs the network | Drift reports: prefixes, devices, Meraki VLANs |
+| `report_helper.py` | All of the above | Daily network health brief |
 | `vault_helper.py` | HashiCorp Vault | Login and credentials for all of the above (used by the other helpers) |
 
 Every helper is read-only. All credentials come from Vault; nothing is stored in this folder. Add `--json` to most commands for machine-readable output, and `-h` to any command for its options.
@@ -30,6 +33,11 @@ The examples below use placeholder names and addresses (`site1-wan-rtr-01`, `192
 
 3. Create `.env` with `VAULT_ADDR`, `VAULT_MOUNT`, `VAULT_PATH` and `LCMC_CACERT=certs/lcmc-epic-ca.pem`. The CA file lets Python trust the internal certificates that ISE and Catalyst Center use. `.env` is the only place the Vault address is kept, and it isn't committed to git.
 4. Log in once with `vault_login.ps1` (Windows) or `vault_login.sh` (macOS / Linux), as shown below. Both also save `VAULT_ADDR` from `.env` permanently, so the Vault CLI works in any new terminal.
+5. Turn on the leak guard (this repo is public). It blocks commits that contain internal addresses from your `.env`, your personal secrets, or token patterns:
+
+       git config core.hooksPath .githooks
+
+6. Run the offline tests after changing a parser: `python -m pytest -q` (no network, Vault or devices needed).
 
 ## Logging in to Vault
 
@@ -87,6 +95,7 @@ Wireless (Catalyst 9800 controllers):
     python cisco_helper.py ssid CORP-VOICE -d site1-wlc-01 -o site1-ssids.txt --append
     python cisco_helper.py locate 192.0.2.25                     # trace an IP to its switchport (route, ARP, MAC, CDP)
     python cisco_helper.py locate 00:11:22:33:44:55 -d core-01   # trace a MAC from a starting device
+    python cisco_helper.py wclient 00:11:22:33:44:55              # wireless client on every WLC (9800 and AireOS)
 
 ## catalyst_helper.py — Catalyst Center
 
@@ -180,6 +189,9 @@ Read-only (GET only). It needs `CDO_URL` in `.env`, and `CDO_UUID` and `CDO_API`
     python cdo_helper.py prefilter-rules                            # Vendor-Prefilter-Policy rules in order
     python cdo_helper.py prefilter-check --src 192.0.2.10 --dst 198.51.100.5 --ports 443,udp/53
     python cdo_helper.py prefilter-check --input request.csv --summary
+    python cdo_helper.py policies FW-01                             # policies assigned to a firewall
+    python cdo_helper.py acp-check --src 192.0.2.10 --dst 198.51.100.5 --ports 443 --device FW-01
+    python cdo_helper.py nat-check 198.51.100.5 --device FW-01
 
 ## ftd_capture_helper.py — FTD packet captures
 
@@ -192,6 +204,16 @@ The only helper that changes anything on a device: it creates and removes `CLAUD
     python ftd_capture_helper.py check                              # allowed or denied, and by which rule
     python ftd_capture_helper.py stop                               # remove the captures
     python ftd_capture_helper.py cleanup                            # leftover CLAUDE_* captures
+
+## endpoint_helper.py, audit_helper.py, report_helper.py — combined answers
+
+    python endpoint_helper.py whois 192.0.2.25                      # NetBox, switchport, then Ordr -> ISE -> Catalyst -> Meraki
+    python endpoint_helper.py whois 00:11:22:33:44:55 --all
+    python endpoint_helper.py path 192.0.2.10 198.51.100.5 --port 443   # which firewalls, which rule decides
+    python audit_helper.py prefixes --site Branch-01                # NetBox prefixes vs subnets on the cores
+    python audit_helper.py devices                                  # Catalyst / Meraki devices NetBox lacks
+    python audit_helper.py meraki-vlans                             # Meraki VLAN subnets NetBox lacks
+    python report_helper.py daily -o brief.txt                      # daily health brief (--no-cdo to skip CDO)
 
 ## Other scripts
 

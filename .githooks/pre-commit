@@ -1,0 +1,24 @@
+#!/bin/sh
+# Blocks commits that would publish internal addresses or secrets (this repo is public).
+# Enable once per clone:  git config core.hooksPath .githooks
+ROOT="$(git rev-parse --show-toplevel)"
+
+# First interpreter that really runs (on Windows, "python3" can be a Microsoft Store placeholder).
+PY=""
+for cand in python python3 py; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c "import sys" >/dev/null 2>&1; then
+        PY="$cand"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    echo "pre-commit: no working Python found; cannot run the leak check" >&2
+    exit 1
+fi
+"$PY" "$ROOT/tools/leak_check.py" || exit 1
+
+# gitleaks adds hundreds of known token formats, if it's installed.
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks protect --staged --redact --no-banner || exit 1
+fi
+exit 0

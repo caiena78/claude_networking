@@ -141,6 +141,21 @@ def group_for_hosts(hosts):
     sys.exit(f"Units {', '.join(hosts)} are no longer in FTD_CAPTURE_HOSTS")
 
 
+AUDIT_LOG = HERE / "captures" / "audit.log"
+
+
+def audit(host, unit, cmd):
+    """Append every command that changes a device (capture / no capture / start / stop) to captures/audit.log
+    (git-ignored, local to each person): UTC time, local user, FTD account, unit and the exact command.
+    Written before the command is sent, so an attempt that fails is still recorded."""
+    AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    who = os.environ.get("USERNAME") or os.environ.get("USER") or "?"
+    account = os.environ.get("CISCO_SRV_ACCOUNT") or "?"
+    stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
+        fh.write(f"{stamp}\tuser={who}\taccount={account}\tunit={unit} ({host})\t{cmd}\n")
+
+
 def GetCreds():
     user = os.environ.get("CISCO_SRV_ACCOUNT")
     pwd = os.environ.get("CISCO_SRV_PWD")
@@ -178,6 +193,8 @@ class FTD:
             sys.exit(f"Refusing to send command not on the allowlist: {cmd}")
         # Long capture commands wrap on the FTD terminal, so netmiko can't match their echo.
         verify = not cmd.startswith(("capture ", "no capture "))
+        if not cmd.startswith("show "):
+            audit(self.host, self.name, cmd)
         out = self.conn.send_command(cmd, read_timeout=120, cmd_verify=verify)
         if re.search(r"Syntax error|^ERROR", out, re.M):
             # CLISH keeps a rejected command on the line, and the next command would be appended

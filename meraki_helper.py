@@ -33,6 +33,8 @@ from typing import Any
 
 import requests
 
+from helper_common import Out, dig as _dig, table as common_table, to_json as common_json
+
 BASE_URL = "https://api.meraki.com/api/v1"
 DEFAULT_ORG_ID = "793109"  # LCMC Health, the only org the key can access
 MAX_RETRIES = 5
@@ -355,15 +357,6 @@ class Meraki:
 # Output
 # ---------------------------------------------------------------------------
 
-def _dig(item: Any, path: str) -> Any:
-    """item["a"]["b"] for path "a.b"; None when any step is missing."""
-    for part in path.split("."):
-        if not isinstance(item, dict):
-            return None
-        item = item.get(part)
-    return item
-
-
 def _iso(value: Any) -> Any:
     """ISO 8601 UTC for epoch seconds; anything else unchanged."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -376,58 +369,13 @@ def _natural(text: str) -> list:
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(text))]
 
 
-def _cell(value: Any, width: int) -> str:
-    if value is None:
-        text = ""
-    elif isinstance(value, list):
-        text = " ".join(json.dumps(v, default=str) if isinstance(v, (dict, list)) else str(v) for v in value)
-    elif isinstance(value, dict):
-        text = " ".join(f"{k}:{v}" for k, v in sorted(value.items()))
-    elif isinstance(value, float):
-        text = f"{value:.2f}".rstrip("0").rstrip(".")
-    else:
-        text = str(value)
-    text = text.replace("\n", " ")
-    return text if len(text) <= width else text[:width - 3] + "..."
-
-
 def table(data: list[dict], columns: list[str], width: int = 60) -> str:
-    """A text table. A column is a dotted path into each row, optionally named "label=path"."""
-    if not data:
-        return "(none)"
-    specs = [c.split("=", 1) if "=" in c else [c, c] for c in columns]
-    rows = [[_cell(_dig(mask(item), path), width) for _, path in specs] for item in data]
-    labels = [label for label, _ in specs]
-    widths = [max(len(x) for x in col) for col in zip(labels, *rows)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    lines = [fmt.format(*labels).rstrip(), fmt.format(*("-" * w for w in widths))]
-    lines += [fmt.format(*row).rstrip() for row in rows]
-    return "\n".join(lines)
+    """A text table (helper_common.table) with secrets masked."""
+    return common_table(data, columns, width, mask=mask)
 
 
 def to_json(data: Any) -> str:
-    return json.dumps(mask(data), indent=2, default=str)
-
-
-class Out:
-    """Collects what a command prints so -o FILE can also save it."""
-
-    def __init__(self) -> None:
-        self.chunks: list[str] = []
-
-    def add(self, text: str) -> None:
-        print(text)
-        self.chunks.append(text)
-
-    def section(self, title: str, body: str) -> None:
-        self.add(f"===== {title}\n{body}\n")
-
-    def save(self, path: str | None, append: bool) -> None:
-        if not path:
-            return
-        with open(path, "a" if append else "w", encoding="utf-8") as fh:
-            fh.write("\n".join(self.chunks) + "\n")
-        print(f"{'Appended to' if append else 'Wrote'} {path}", file=sys.stderr)
+    return common_json(data, mask=mask)
 
 
 def _emit(out: Out, args: argparse.Namespace, data: Any, columns: list[str] | None = None, width: int = 60) -> None:
@@ -779,7 +727,10 @@ def cmd_vlans(m: Meraki, args, out: Out) -> None:
             if "VLANs are not enabled" not in str(exc):
                 rows.append({"network": net["name"], "name": f"error: {exc}"})
                 continue
-            single = m.get(f"networks/{net['id']}/appliance/singleLan")
+            single = m.try_get(f"networks/{net['id']}/appliance/singleLan")
+            if "error" in single:  # e.g. an MX in passthrough mode has no LAN subnet
+                rows.append({"network": net["name"], "id": "(passthrough)", "name": single["error"].split(": ", 1)[-1]})
+                continue
             vlans = [{"id": "(single LAN)", "name": "", **single}]
         for v in vlans:
             rows.append({"network": net["name"], **v})

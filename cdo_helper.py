@@ -40,6 +40,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+from helper_common import table, to_json
+
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")  # CDO_URL; environment variables win
 
@@ -143,6 +145,52 @@ class CDO:
     def prefilter_rules(self, policy_id: str) -> list[dict]:
         rules = self.get_all(f"policy/prefilterpolicies/{policy_id}/prefilterrules", expanded="true")
         return sorted(rules, key=lambda r: r["metadata"]["ruleIndex"])
+
+    def access_policy(self, name: str) -> dict:
+        """Full access control policy (with defaultAction and prefilterPolicySetting) by name."""
+        pol = next((p for p in self.get_all("policy/accesspolicies") if p["name"] == name), None)
+        if not pol:
+            raise CDOError(f"access policy {name!r} not found")
+        return self.get(f"policy/accesspolicies/{pol['id']}")
+
+    def access_rules(self, policy_id: str) -> list[dict]:
+        rules = self.get_all(f"policy/accesspolicies/{policy_id}/accessrules", expanded="true")
+        return sorted(rules, key=lambda r: r["metadata"]["ruleIndex"])
+
+    def nat_policy(self, name: str) -> dict:
+        pol = next((p for p in self.get_all("policy/ftdnatpolicies") if p["name"] == name), None)
+        if not pol:
+            raise CDOError(f"NAT policy {name!r} not found")
+        return pol
+
+    def nat_rules(self, policy_id: str) -> list[dict]:
+        """Manual and auto NAT rules of a policy, each tagged with kind = manual | auto."""
+        rules = [{**r, "kind": "manual"} for r in
+                 self.get_all(f"policy/ftdnatpolicies/{policy_id}/manualnatrules", expanded="true")]
+        rules += [{**r, "kind": "auto"} for r in
+                  self.get_all(f"policy/ftdnatpolicies/{policy_id}/autonatrules", expanded="true")]
+        return rules
+
+    def policies_for_device(self, device_name: str) -> dict[str, str]:
+        """Policies assigned to a device, its HA pair or its device group: {policy type: policy name}.
+
+        Also adds 'PrefilterPolicy' from the access policy's prefilter setting."""
+        dev = self.device(device_name)
+        names = {dev["name"]}
+        if (dev.get("deviceGroup") or {}).get("name"):
+            names.add(dev["deviceGroup"]["name"])
+        for ha in self.ha_pairs():
+            if dev["name"] in ((ha.get("primary") or {}).get("name"), (ha.get("secondary") or {}).get("name")):
+                names.add(ha["name"])
+        found: dict[str, str] = {"device": dev["name"], "targets": ", ".join(sorted(names))}
+        for a in self.get_all("assignment/policyassignments", expanded="true"):
+            if any(t.get("name") in names for t in a.get("targets", [])):
+                found[a["policy"]["type"]] = a["policy"]["name"]
+        if found.get("AccessPolicy"):
+            pre = (self.access_policy(found["AccessPolicy"]).get("prefilterPolicySetting") or {}).get("name")
+            if pre:
+                found["PrefilterPolicy"] = pre
+        return found
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +626,122 @@ def check_ports(rules, src, dst, req_ports, policy_name=POLICY_NAME):
     return first_hit
 
 
+# ---------- access control policy ----------
+
+ACP_ALLOW = {"ALLOW", "TRUST"}
+# Conditions on an ACP rule that IPs and ports alone can't evaluate.
+ACP_EXTRA_CONDITIONS = ("applications", "urls", "users", "vlanTags", "sourceDynamicObjects",
+                        "destinationDynamicObjects", "sourcePorts", "sourceSecurityGroupTags",
+                        "destinationSecurityGroupTags")
+
+
+def _has_values(field) -> bool:
+    if isinstance(field, dict):
+        return any(_has_values(v) for k, v in field.items() if k not in ("type", "id", "name"))
+    if isinstance(field, list):
+        return bool(field)
+    return bool(field)
+
+
+def acp_evaluate(rules, default_action, src, dst, req_ports):
+    """First-match evaluation of an access control policy for each requested port.
+
+    Returns {port label: {"verdict", "action", "rule", "src_hit", "dst_hit", "port_hit", "skipped"}}.
+    MONITOR rules don't end evaluation. Rules with application / URL / user / other conditions that IPs and
+    ports can't decide are listed in "skipped" and evaluation continues past them."""
+    results = {}
+    for req in req_ports:
+        label, skipped, decided = req[3], [], None
+        for rule in rules:
+            if not rule.get("enabled"):
+                continue
+            src_el, _, _ = rule_networks(rule.get("sourceNetworks"))
+            dst_el, _, _ = rule_networks(rule.get("destinationNetworks"))
+            port_el, _ = rule_ports(rule.get("destinationPorts"))
+            s, d, p = net_match(src, src_el), net_match(dst, dst_el), port_match(req, port_el)
+            if not (s and d and p):
+                continue
+            extra = [c for c in ACP_EXTRA_CONDITIONS if _has_values(rule.get(c))]
+            if extra or rule.get("action") == "MONITOR":
+                skipped.append((rule, extra or ["MONITOR (logs only, evaluation continues)"]))
+                continue
+            decided = {"rule": rule, "src_hit": s, "dst_hit": d, "port_hit": p}
+            break
+        if decided:
+            action = decided["rule"].get("action")
+            verdict = "ALLOWED" if action in ACP_ALLOW else "DENIED"
+            results[label] = {"verdict": verdict, "action": action, "skipped": skipped, **decided}
+        else:
+            results[label] = {"verdict": "ALLOWED" if default_action in ACP_ALLOW else "DENIED",
+                              "action": f"DEFAULT {default_action}", "rule": None, "skipped": skipped}
+    return results
+
+
+def print_acp(results, policy_name, src, dst):
+    print(f"Access control policy {policy_name}: {src} -> {dst}\n")
+    for label, r in results.items():
+        rule = r["rule"]
+        where = (f"rule #{rule['metadata']['ruleIndex']} {rule['name']} "
+                 f"[{rule['metadata'].get('section', '')}/{rule['metadata'].get('category', '')}]"
+                 if rule else "no rule matched -> default action")
+        print(f"  {label:12} {r['verdict']:8} {r['action']:16} {where}")
+        if rule:
+            zones = lambda f: ", ".join(o["name"] for o in (rule.get(f) or {}).get("objects", [])) or "any"
+            print(f"               zones {zones('sourceZones')} -> {zones('destinationZones')}")
+            print(f"               source matched by: {'; '.join(r['src_hit'])}")
+            print(f"               destination matched by: {'; '.join(r['dst_hit'])}")
+            print(f"               port matched by: {'; '.join(r['port_hit'])}")
+        for srule, why in r["skipped"]:
+            print(f"               passed over #{srule['metadata']['ruleIndex']} {srule['name']} "
+                  f"({srule.get('action')}): also needs {', '.join(why)} - may match first in practice")
+    print()
+    print("NOTE: the prefilter policy is evaluated BEFORE this policy. Traffic a prefilter rule FASTPATHs or BLOCKs")
+    print("      never reaches the access control policy - check it with prefilter-check (or use endpoint_helper.py path).")
+    print()
+
+
+# ---------- NAT ----------
+
+NAT_FIELDS = {"manual": ("originalSource", "translatedSource", "originalDestination", "translatedDestination"),
+              "auto": ("originalNetwork", "translatedNetwork")}
+
+
+def nat_matches(rules, target, include_any=False):
+    """NAT rules where the IP/network falls inside any original or translated object. Catch-all objects
+    (0.0.0.0/0, e.g. any-ipv4) are ignored unless include_any, since they match every address."""
+    hits = []
+    for rule in rules:
+        matched, fields = [], {}
+        for f in NAT_FIELDS[rule["kind"]]:
+            obj = rule.get(f)
+            if not obj or not obj.get("id"):
+                continue
+            fields[f] = obj.get("name")
+            elements, _ = resolve_network(obj, "")
+            if not include_any:
+                elements = [e for e in elements if not (e[1] == 0 and e[2] >= 2 ** 32 - 1)]
+            if net_match(target, elements):
+                matched.append(f)
+        if matched:
+            hits.append({"rule": rule, "matched": matched, "fields": fields})
+    return hits
+
+
+def print_nat(hits, policy_name, target):
+    print(f"NAT policy {policy_name}: rules involving {target}\n")
+    if not hits:
+        print("  (no NAT rule references this address)")
+    for h in hits:
+        r = h["rule"]
+        intf = lambda f: (r.get(f) or {}).get("name", "any")
+        print(f"  {r['kind']:6} {r.get('natType', '')}  enabled={r.get('enabled')}  "
+              f"{intf('sourceInterface')} -> {intf('destinationInterface')}"
+              + (f"  section {r['metadata'].get('section')}" if (r.get("metadata") or {}).get("section") else ""))
+        for f, name in h["fields"].items():
+            print(f"    {'*' if f in h['matched'] else ' '} {f:22} {name}")
+    print()
+
+
 # ---------- pasted CSV / spreadsheet input ----------
 
 IP_TOKEN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2}|\s*-\s*\d{1,3}(?:\.\d{1,3}){3}|\s*-\s*\d{1,3}\b)?")
@@ -718,34 +882,6 @@ def prefilter_check(args) -> int:
 # CLI
 # ---------------------------------------------------------------------------
 
-def _dig(item: Any, path: str) -> Any:
-    for part in path.split("."):
-        if not isinstance(item, dict):
-            return None
-        item = item.get(part)
-    return item
-
-
-def _table(rows: list[dict], columns: list[str]) -> str:
-    """Text table; a column is a dotted path, optionally named "label=path"."""
-    if not rows:
-        return "(none)"
-    specs = [c.split("=", 1) if "=" in c else [c, c] for c in columns]
-    cells = []
-    for r in rows:
-        line = []
-        for _, path in specs:
-            v = _dig(r, path)
-            v = " ".join(map(str, v)) if isinstance(v, list) else ("" if v is None else str(v))
-            line.append(v if len(v) <= 60 else v[:57] + "...")
-        cells.append(line)
-    labels = [s[0] for s in specs]
-    widths = [max(len(x) for x in col) for col in zip(labels, *cells)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    return "\n".join([fmt.format(*labels).rstrip(), fmt.format(*("-" * w for w in widths))]
-                     + [fmt.format(*c).rstrip() for c in cells])
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only Cisco CDO / cdFMC helper (GET only).")
     parser.add_argument("--json", action="store_true", help="print JSON")
@@ -768,6 +904,21 @@ def main() -> int:
     p.add_argument("--input", help="CSV/TSV file of source,destination,ports rows ('-' for stdin)")
     p.add_argument("--summary", action="store_true", help="only print the summary table")
     p.add_argument("--policy", default=POLICY_NAME, help=f"policy name (default {POLICY_NAME})")
+    p = sub.add_parser("policies", help="policies assigned to a device (access, NAT, prefilter, platform, VPN...)")
+    p.add_argument("device")
+    p = sub.add_parser("acp-check", help="access control policy verdict for src -> dst on ports (first match wins)")
+    p.add_argument("--src", required=True, help="source IP, network or range")
+    p.add_argument("--dst", required=True, help="destination IP, network or range")
+    p.add_argument("--ports", required=True, help="comma list: 443,tcp/22,udp/53,8000-8010,icmp")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--device", help="use the access policy assigned to this device")
+    g.add_argument("--policy", help="access policy name")
+    p = sub.add_parser("nat-check", help="NAT rules whose original or translated objects contain an IP")
+    p.add_argument("ip", help="IP, network or range")
+    p.add_argument("--include-any", action="store_true", help="also show rules that match only via any/0.0.0.0/0")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--device", help="use the NAT policy assigned to this device")
+    g.add_argument("--policy", help="NAT policy name")
     p = sub.add_parser("get", help="GET any path under the FMC domain, e.g. object/networkgroups")
     p.add_argument("path")
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE")
@@ -779,6 +930,38 @@ def main() -> int:
     if args.cmd == "prefilter-check":
         return prefilter_check(args)
     cdo = client()
+    if args.cmd == "policies":
+        found = cdo.policies_for_device(args.device)
+        print(to_json(found) if args.json else "\n".join(f"{k:28} {v}" for k, v in found.items()))
+        return 0
+    if args.cmd == "acp-check":
+        name = args.policy or cdo.policies_for_device(args.device).get("AccessPolicy")
+        if not name:
+            raise CDOError(f"no access policy is assigned to {args.device}")
+        pol = cdo.access_policy(name)
+        rules = cdo.access_rules(pol["id"])
+        print("Loading objects...", file=sys.stderr)
+        preload_objects()
+        res = acp_evaluate(rules, (pol.get("defaultAction") or {}).get("action"),
+                           Target(args.src), Target(args.dst), parse_requested_ports(args.ports))
+        if args.json:
+            print(to_json({k: {**v, "rule": (v["rule"] or {}).get("name"),
+                               "skipped": [s[0]["name"] for s in v["skipped"]]} for k, v in res.items()}))
+        else:
+            print_acp(res, name, args.src, args.dst)
+        return 0 if all(v["verdict"] == "ALLOWED" for v in res.values()) else 1
+    if args.cmd == "nat-check":
+        name = args.policy or cdo.policies_for_device(args.device).get("FTDNatPolicy")
+        if not name:
+            raise CDOError(f"no NAT policy is assigned to {args.device}")
+        rules = cdo.nat_rules(cdo.nat_policy(name)["id"])
+        hits = nat_matches(rules, Target(args.ip), args.include_any)
+        if args.json:
+            print(to_json([{"kind": h["rule"]["kind"], "natType": h["rule"].get("natType"), "matched": h["matched"],
+                            "fields": h["fields"], "enabled": h["rule"].get("enabled")} for h in hits]))
+        else:
+            print_nat(hits, name, args.ip)
+        return 0
     if args.cmd == "devices":
         rows, cols = cdo.devices(), ["name", "model", "sw_version=sw_version", "hostName", "healthStatus", "deviceGroup.name", "id"]
     elif args.cmd == "ha":
@@ -806,7 +989,7 @@ def main() -> int:
         params = dict(kv.split("=", 1) for kv in args.param)
         print(json.dumps(cdo.get(args.path, **params) if args.one_page else cdo.get_all(args.path, **params), indent=2))
         return 0
-    print(json.dumps(rows, indent=2) if args.json else _table(rows, cols))
+    print(to_json(rows) if args.json else table(rows, cols))
     return 0
 
 

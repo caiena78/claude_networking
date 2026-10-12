@@ -46,6 +46,9 @@ PLATFORM_MAP: dict[str, str] = {
     "junos": "juniper_junos",
     "juniper-junos": "juniper_junos",
     "juniper_junos": "juniper_junos",
+    "airos": "cisco_wlc_ssh",          # AireOS WLCs (5508, 5520, 8540, 3504)
+    "aireos": "cisco_wlc_ssh",
+    "cisco-aireos": "cisco_wlc_ssh",
 }
 DEFAULT_DEVICE_TYPE = "cisco_ios"
 
@@ -86,17 +89,39 @@ def resolve_site(nb: pynetbox.api, site: str) -> str:
     raise ValueError(f"{site!r} matches {len(matches)} sites: {', '.join(s.name for s in matches[:10])}")
 
 
+def _device_entry(raw: dict, name: str) -> dict[str, Any]:
+    """Device dict for the runners, from a device as the API returned it (dict(record))."""
+    ip = (raw.get("primary_ip4") or raw.get("primary_ip") or {}).get("address")
+    platform = (raw.get("platform") or {}).get("slug")
+    return {
+        "name": name,
+        "host": str(ip).split("/")[0] if ip else raw.get("name"),
+        "platform": platform,
+        "device_type": device_type_for(platform, name),
+        "site": (raw.get("site") or {}).get("name", ""),
+        "status": (raw.get("status") or {}).get("value", ""),
+        "role": _slug(raw.get("role") or raw.get("device_role")),
+        "model": _slug(raw.get("device_type")),
+    }
+
+
 def get_devices(
     nb: pynetbox.api,
     tag: str | None = "wan_router",
     site: str | None = None,
     name_contains: str | None = None,
     role: str | None = None,
+    collapse_vc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Return (devices, skipped) matching the filters. tag=None means any tag.
     site can be a slug, a site name, or a unique part of a site name.
 
-    Each device dict has: name, host, platform, device_type, site, status.
+    Virtual chassis (switch stacks, VSS/StackWise Virtual pairs) are collapsed into ONE device named after the
+    virtual chassis, which connects to the master's management IP (the members share one control plane and
+    usually only the master has a primary IP in NetBox). It also has "members" (member device names) and
+    "vc": True. A name_contains filter also matches virtual chassis names. collapse_vc=False lists members.
+
+    Each device dict has: name, host, platform, device_type, site, status, role, model.
     Each skipped dict has: name, reason.
     """
     filters: dict[str, Any] = {}
@@ -104,32 +129,73 @@ def get_devices(
         filters["tag"] = tag
     if site:
         filters["site"] = resolve_site(nb, site)
-    if name_contains:
-        filters["name__ic"] = name_contains
     if role:
         filters["role"] = role
 
+    records = {d.id: dict(d) for d in nb.dcim.devices.filter(**filters, **({"name__ic": name_contains}
+                                                                           if name_contains else {}))}
+    if name_contains and collapse_vc:
+        # Stacks whose virtual chassis name matches, even when the member names don't.
+        vc_ids = [vc.id for vc in nb.dcim.virtual_chassis.filter(name__ic=name_contains)]
+        if vc_ids:
+            for d in nb.dcim.devices.filter(**filters, virtual_chassis_id=vc_ids):
+                records.setdefault(d.id, dict(d))
+
     devices: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
-    for device in nb.dcim.devices.filter(**filters):
-        name = device.name or f"id-{device.id}"
-        host = _host_for(device)
-        if not host:
+    stacks: dict[int, list[dict]] = {}
+    for raw in records.values():
+        vc = raw.get("virtual_chassis")
+        if vc and collapse_vc:
+            stacks.setdefault(vc["id"], []).append(raw)
+            continue
+        name = raw.get("name") or f"id-{raw['id']}"
+        entry = _device_entry(raw, name)
+        if not entry["host"]:
             skipped.append({"name": name, "reason": "no primary IP or name"})
             continue
-        platform = device.platform.slug if device.platform else None
-        devices.append({
-            "name": name,
-            "host": host,
-            "platform": platform,
-            "device_type": device_type_for(platform, name),
-            "site": device.site.name if device.site else "",
-            "status": device.status.value if device.status else "",
-            "role": _slug(getattr(device, "role", None) or getattr(device, "device_role", None)),
-            "model": _slug(device.device_type),
-        })
+        devices.append(entry)
+
+    for vc_id, members in stacks.items():
+        vc = members[0]["virtual_chassis"]
+        master_id = (vc.get("master") or {}).get("id")
+        with_ip = [m for m in members if m.get("primary_ip4") or m.get("primary_ip")]
+        if not with_ip:
+            # The filter may have matched only non-master members: fetch the whole stack.
+            full = [dict(d) for d in nb.dcim.devices.filter(virtual_chassis_id=vc_id)]
+            with_ip = [m for m in full if m.get("primary_ip4") or m.get("primary_ip")]
+            members = full or members
+        chosen = next((m for m in with_ip if m["id"] == master_id), None) or \
+            (sorted(with_ip, key=lambda m: m.get("vc_position") or 99)[0] if with_ip else None)
+        vc_name = vc.get("name") or members[0].get("name")
+        if not chosen:
+            skipped.append({"name": vc_name, "reason": "virtual chassis has no member with a primary IP"})
+            continue
+        entry = _device_entry(chosen, vc_name)
+        entry.update(vc=True, master=chosen.get("name"),
+                     members=[m["name"] for m in sorted(members, key=lambda m: m.get("vc_position") or 99)])
+        devices.append(entry)
     devices.sort(key=lambda d: d["name"])
     return devices, skipped
+
+
+def virtual_chassis(nb: pynetbox.api, name: str) -> list[dict[str, Any]]:
+    """Virtual chassis whose name equals (else contains) the text, with every member's position, model and serial."""
+    found = list(nb.dcim.virtual_chassis.filter(name__ie=name)) or list(nb.dcim.virtual_chassis.filter(name__ic=name))
+    out = []
+    for vc in found[:25]:
+        raw = dict(vc)
+        members = [dict(d) for d in nb.dcim.devices.filter(virtual_chassis_id=vc.id)]
+        out.append({
+            "name": raw.get("name"), "id": raw.get("id"), "domain": raw.get("domain") or "",
+            "master": (raw.get("master") or {}).get("name", ""), "member_count": raw.get("member_count"),
+            "members": [{"name": m.get("name"), "position": m.get("vc_position"), "priority": m.get("vc_priority"),
+                         "model": _slug(m.get("device_type")), "serial": m.get("serial") or "",
+                         "primary_ip": ((m.get("primary_ip4") or {}).get("address") or ""),
+                         "status": (m.get("status") or {}).get("value", ""), "site": (m.get("site") or {}).get("name", "")}
+                        for m in sorted(members, key=lambda m: m.get("vc_position") or 99)],
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +206,18 @@ def _slug(obj: Any) -> str:
     """Display value for a nested NetBox object (name, model, slug, value) or ''."""
     if obj is None:
         return ""
+    # Read the nested object as the API returned it. getattr() on a field it didn't send (e.g. "name" on a
+    # nested device type, which only has "model") makes pynetbox fetch the full record: one extra API call
+    # per device, which made device lists thousands of calls long.
+    try:
+        data = dict(obj)
+    except (TypeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        for key in ("name", "model", "display", "slug", "value", "label"):
+            if data.get(key):
+                return str(data[key])
+        return str(obj)
     for attr in ("name", "model", "display", "slug", "value"):
         value = getattr(obj, attr, None)
         if value:
@@ -167,6 +245,16 @@ def device_record(nb: pynetbox.api, name: str) -> list[dict[str, Any]]:
     return records
 
 
+def inventory(nb: pynetbox.api, **filters: Any) -> list[dict[str, Any]]:
+    """Every device (or those matching filters) with the fields needed to compare against other systems."""
+    return [{
+        "name": d.name or "", "serial": (d.serial or "").strip(), "site": _slug(d.site),
+        "role": _slug(getattr(d, "role", None) or getattr(d, "device_role", None)),
+        "model": _slug(d.device_type), "status": _slug(d.status),
+        "primary_ip": str(d.primary_ip4).split("/")[0] if d.primary_ip4 else "",
+    } for d in (nb.dcim.devices.filter(**filters) if filters else nb.dcim.devices.all())]
+
+
 def ip_lookup(nb: pynetbox.api, ip: str) -> list[dict[str, Any]]:
     """Which device / interface an IP address is assigned to in NetBox."""
     rows = []
@@ -191,10 +279,19 @@ def prefix_lookup(nb: pynetbox.api, value: str) -> list[dict[str, Any]]:
 
 
 def _prefix_row(p: Any) -> dict[str, Any]:
+    # Read the record as returned (dict(p)): asking pynetbox for an attribute the API didn't send (e.g. 'site'
+    # on NetBox 4.2+, where prefixes have 'scope') makes it fetch the full record, one extra call per prefix.
+    raw = dict(p)
+    scope = raw.get("site") or (raw.get("scope") if str(raw.get("scope_type", "")).endswith("site") else None) \
+        or raw.get("scope")
+    name = lambda v, *keys: next((str(v[k]) for k in keys if isinstance(v, dict) and v.get(k)), "")  # noqa: E731
+    vlan = raw.get("vlan") or {}
     return {
-        "prefix": str(p.prefix), "status": _slug(p.status), "site": _slug(getattr(p, "site", None) or getattr(p, "scope", None)),
-        "vlan": f"{p.vlan.vid} {p.vlan.name}" if p.vlan else "", "vrf": _slug(p.vrf),
-        "role": _slug(p.role), "tenant": _slug(p.tenant), "description": p.description or "",
+        "prefix": str(raw.get("prefix")), "status": name(raw.get("status"), "value", "label"),
+        "site": name(scope, "name", "display"),
+        "vlan": f"{vlan.get('vid')} {vlan.get('name')}" if vlan else "", "vrf": name(raw.get("vrf"), "name"),
+        "role": name(raw.get("role"), "name"), "tenant": name(raw.get("tenant"), "name"),
+        "description": raw.get("description") or "",
     }
 
 
@@ -262,7 +359,10 @@ def main() -> int:
     p.add_argument("--site", help="site name or slug")
     p.add_argument("--tag", help="tag, e.g. wan_router")
     p.add_argument("--role", help="device role slug, e.g. router")
-    p.add_argument("--name", help="device names containing this text")
+    p.add_argument("--name", help="device (or virtual chassis) names containing this text")
+    p.add_argument("--members", action="store_true", help="list virtual chassis members separately")
+    p = sub.add_parser("vc", help="virtual chassis (switch stack) and its members: position, model, serial, IP")
+    p.add_argument("name")
     p = sub.add_parser("device", help="full record for one device (exact name, else names containing the text)")
     p.add_argument("name")
     p = sub.add_parser("ip", help="which device/interface has this IP")
@@ -292,10 +392,22 @@ def main() -> int:
             if not (args.site or args.tag or args.role or args.name):
                 print("give at least one of --site, --tag, --role, --name", file=sys.stderr)
                 return 2
-            found, skipped = get_devices(nb, tag=args.tag, site=args.site, name_contains=args.name, role=args.role)
-            _print(found, args.json, ["name", "host", "site", "role", "model", "platform", "status"])
+            found, skipped = get_devices(nb, tag=args.tag, site=args.site, name_contains=args.name, role=args.role,
+                                         collapse_vc=not args.members)
+            for d in found:
+                d["stack"] = f"{len(d['members'])} members" if d.get("vc") else ""
+            _print(found, args.json, ["name", "host", "site", "role", "model", "platform", "status", "stack"])
             for s in skipped:
                 print(f"skipped {s['name']}: {s['reason']}", file=sys.stderr)
+        elif args.cmd == "vc":
+            vcs = virtual_chassis(nb, args.name)
+            if args.json or not vcs:
+                _print(vcs, True)
+            for vc in ([] if args.json else vcs):
+                print(f"{vc['name']}  master {vc['master']}  members {vc['member_count']}"
+                      + (f"  domain {vc['domain']}" if vc["domain"] else ""))
+                _print(vc["members"], False, ["position", "name", "model", "serial", "primary_ip", "status", "site"])
+                print()
         elif args.cmd == "device":
             _print(device_record(nb, args.name), True)
         elif args.cmd == "ip":

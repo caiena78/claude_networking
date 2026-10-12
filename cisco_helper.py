@@ -88,6 +88,8 @@ COMMANDS: dict[str, tuple[str, str, str | None, str | None]] = {
     "wlans":        ("WLAN / SSID summary (Catalyst 9800)", "show wlan summary", None, None),
     "ssid":         ("everything for one SSID on a 9800: WLAN profile, policy tags, policy profiles, show wlan",
                      "show wlan summary", None, "required"),
+    "wclient":      ("wireless client by MAC on the WLCs (9800 and AireOS): AP, SSID, VLAN, IP, state, user; "
+                     "defaults to every WLC in NetBox", "show wireless client mac-address {arg} detail", None, "required"),
 }
 # IOS-XE has better resource views than classic IOS.
 XE_OVERRIDES = {"memory": "show platform resources"}
@@ -339,6 +341,32 @@ def cdp_neighbor_kind(neighbor: dict[str, str]) -> str:
     return "other"
 
 
+# "Key ....... value" (AireOS) or "Key : value" (9800) -> canonical field name.
+WCLIENT_FIELDS = {
+    "client mac address": "mac", "client ipv4 address": "ip", "ip address": "ip",
+    "ap name": "ap", "wireless lan network name (ssid)": "ssid", "wireless lan network name": "ssid",
+    "vlan": "vlan", "client state": "state", "policy manager state": "policy_state", "policy state": "policy_state",
+    "client username": "user", "client user name": "user", "username": "user",
+    "wireless lan profile name": "wlan_profile", "radio type": "radio", "connected for": "connected_for",
+    "mobility state": "mobility", "mobility role": "mobility",
+    "mobility foreign ip address": "foreign_wlc", "mobility anchor ip address": "anchor_wlc",
+}
+
+
+def parse_wireless_client(output: str) -> dict[str, str]:
+    """Key fields of 'show wireless client mac-address <mac> detail' (9800) or 'show client detail <mac>'
+    (AireOS). Empty dict when the client isn't on that controller."""
+    found: dict[str, str] = {}
+    for line in output.splitlines():
+        m = re.match(r"^\s*([A-Za-z0-9 ()/\-]+?)\s*(?:\.{2,}|:)\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        key = WCLIENT_FIELDS.get(m.group(1).strip().lower())
+        if key and key not in found and m.group(2).strip():
+            found[key] = m.group(2).strip()
+    return found if (found.get("mac") or found.get("ap")) else {}
+
+
 def parent_interface(name: str) -> str:
     """GigabitEthernet0/0/1.110 -> GigabitEthernet0/0/1."""
     return name.split(".")[0]
@@ -489,6 +517,13 @@ class CiscoRunner:
                 if not arg:
                     raise CiscoError("'ssid' needs an SSID name")
                 command = f"ssid {arg} (show wlan summary, running-config sections, show wlan name)"
+            elif command_name == "wclient":
+                mac = parse_mac(arg or "")
+                if not mac:
+                    raise CiscoError(f"'wclient' needs a MAC address, got {arg!r}")
+                command = validate_show(f"show client detail {mac_formats(mac)['colon']}"
+                                        if device["device_type"] == "cisco_wlc_ssh"
+                                        else f"show wireless client mac-address {mac} detail")
             elif command_name == "route" and arg:
                 if vrf is None:  # "" means the global table
                     vrf = default_vrf(device)
@@ -516,6 +551,10 @@ class CiscoRunner:
             if isinstance(output, str) and re.search(r"^\s*% ?(Invalid input|Incomplete command|Ambiguous command)",
                                                      output, re.M):
                 result["error"] = "device rejected the command"
+            if command_name == "wclient" and isinstance(output, str):
+                result["wclient"] = parse_wireless_client(output)
+                if result["error"] == "device rejected the command" and not result["wclient"]:
+                    result["error"] = None  # a WLC that doesn't know the MAC can answer with an error line
             if command_name == "route" and arg and isinstance(output, str):
                 result["route_result"] = classify_route(output)
                 if result["route_result"] == "error":
@@ -935,6 +974,11 @@ def main() -> int:
             return 2
         if not (args.device or args.site or args.tag or args.name):
             args.tag = "wan_router"  # route lookups default to every WAN router
+    wclient = args.command == "wclient"
+    default_wlcs = wclient and not (args.device or args.site or args.tag or args.name)
+    if default_wlcs:
+        args.name = "wlc"  # every NetBox device with "wlc" in its name
+        args.max_devices = max(args.max_devices, 60)
 
     try:
         if raw_command:
@@ -943,6 +987,8 @@ def main() -> int:
             raise CiscoError("pick devices with -d <name|ip>, --site, --tag or --name")
         runner = CiscoRunner(timeout=args.timeout, workers=args.workers)
         devices = runner.resolve(args.device, args.site, args.tag, args.name, args.device_type)
+        if default_wlcs:
+            devices = [d for d in devices if is_ip(d["host"])]  # standby units have no management IP
     except (CiscoError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -963,6 +1009,8 @@ def main() -> int:
 
     if args.json:
         text = json.dumps(results, indent=2, default=str)
+    elif wclient:
+        text = ""  # only the summary below; the raw output is in --json
     else:
         chunks = []
         for r in results:
@@ -991,8 +1039,28 @@ def main() -> int:
                                  for h in d.get("next_hops", []))
                 route = f"{d.get('prefix', '')} {d.get('protocol', '')} [{d.get('distance', '')}/{d.get('metric', '')}] {hops}" if d else ""
                 print(f"  {r['device']:<{width}}  {r['host']:<15}  {status:<9}  {route or r['error'] or ''}")
+        if wclient:
+            hits = [r for r in results if r.get("wclient")]
+            print(f"Wireless client {args.arg}: found on {len(hits)} of {len(results)} WLCs")
+            for r in hits:
+                c = r["wclient"]
+                if (c.get("mobility") or "").lower() == "anchor":
+                    # On the anchor, "AP Name" holds the foreign controller's IP, not an AP.
+                    ap = f"(anchored here; client is on foreign WLC {c.get('foreign_wlc') or c.get('ap', '?')})"
+                elif (c.get("mobility") or "").lower() == "foreign":
+                    ap = f"{c.get('ap', '?')} (foreign; anchored on {c.get('anchor_wlc', '?')})"
+                else:
+                    ap = c.get("ap", "?")
+                print(f"  {r['device']} ({r['host']}): AP {ap}  SSID {c.get('ssid', '?')}  "
+                      f"VLAN {c.get('vlan', '?')}  IP {c.get('ip', '?')}  state {c.get('state') or c.get('policy_state', '?')}"
+                      + (f"  user {c['user']}" if c.get("user") else ""))
+            errors = [r for r in results if r["error"]]
+            if errors:
+                print("  errors: " + "; ".join(f"{r['device']}: {r['error']}" for r in errors))
     if route_lookup:
         return 0 if any(r.get("route_result") == "found" for r in results) else 1
+    if wclient:
+        return 0 if any(r.get("wclient") for r in results) else 1
     return 1 if any(r["error"] for r in results) else 0
 
 
