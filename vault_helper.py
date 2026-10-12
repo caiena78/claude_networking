@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 try:
     # Use the OS certificate store so an internal CA on the Vault server is trusted.
@@ -34,6 +34,11 @@ except ImportError:
 
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
+# .env is the source of truth for the Vault address: its VAULT_ADDR wins over an environment variable
+# (e.g. one set earlier by set_vault_addr.ps1). Other keys keep the usual rule: the environment wins.
+_env_addr = dotenv_values(HERE / ".env").get("VAULT_ADDR")
+if _env_addr:
+    os.environ["VAULT_ADDR"] = _env_addr
 
 # CA bundle paths in .env may be relative to this folder; make them absolute so scripts work from any directory.
 for _var in ("LCMC_CACERT", "ISE_CACERT", "CAT_CACERT", "VAULT_CACERT"):

@@ -20,6 +20,7 @@ python netbox_helper.py tags
 `--site` accepts a site name, a slug or a unique part of a name. `--json` gives full output.
 
 3. **Look devices up in the order below** (see "Finding a device").
+4. **Don't use the `netbox-netmiko-mcp` MCP tools** (`mcp__netbox-netmiko-mcp__*`), even if they're connected. That server is abandoned, and this repo replaces it. Use the helpers.
 
 ## Finding a device
 
@@ -86,11 +87,11 @@ On those same cores, **VRF `div` and the global (default) table are for isolated
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |
 | `meraki_helper.py` | Read-only Meraki Dashboard API client and CLI: inventory (`sites`, `devices`, `aps`, `device`, `inventory`, `licenses`, `firmware`), clients (`clients`, `client`, `top`), wireless (`ssids`, `ssid`, `wifi-health`, `air-marshal`), MX (`uplinks`, `vpn`, `vlans`, `routes`, `firewall`, `security`, `appliance`), switches (`ports`, `switch`), audit (`events`, `alerts`, `changes`, `admins`) and `get <path>`. Secrets are masked. Use it for all Meraki access |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
-| `vault_login.ps1` / `vault_login.sh` | Vault OIDC login in a private browser window (Windows / macOS). The token is never printed |
+| `vault_login.ps1` / `vault_login.sh` | Vault OIDC login in a private browser window (Windows / macOS and Linux). The token is never printed. Both also save `VAULT_ADDR` from `.env` permanently, writing it only when it changes. `vault_login.ps1` sets a user environment variable (`-NoPersist` skips this), so `set_vault_addr.ps1` is no longer needed. `vault_login.sh` writes one `export VAULT_ADDR=...  # set by vault_login.sh` line to `~/.zshrc`, `~/.bash_profile` (macOS bash), `~/.bashrc` (Linux bash) or `~/.profile` (`-n` skips this) |
 | `set_vault_addr.ps1` | Sets `VAULT_ADDR` permanently for the Windows user. **Local only:** it's in `.gitignore` and must not be committed, because it holds the internal Vault address |
 | `vault_list.py` | Lists the Vault secrets the logged-in account can see. Also used to sign in as a different user |
 | `requirements.txt` | Python dependencies |
-| `.env` | `VAULT_ADDR`, `VAULT_MOUNT` and `VAULT_PATH` (not secrets). It may also hold `LCMC_CACERT`, a path to the EPIC-CA root PEM |
+| `.env` | `VAULT_ADDR`, `VAULT_MOUNT` and `VAULT_PATH` (not secrets). It may also hold `LCMC_CACERT`, a path to the EPIC-CA root PEM. **`.env` is the only place the Vault address is kept.** `vault_helper.py` (and so every helper and `vault_list.py`), `vault_login.ps1`, `vault_login.sh` and `set_vault_addr.ps1` read `VAULT_ADDR` from it, and it wins over a `VAULT_ADDR` environment variable. Never hard-code the address in a tracked file. For the other keys, an environment variable still wins over `.env` |
 | `.env.old` | Backup. Do not read it, use it or change it |
 
 Vault secrets at `VAULT_MOUNT`/`VAULT_PATH`: `ansible_user`, `ansible_password`, `ansible_become_password` (enable secret), `netbox_url`, `netbox_token`, `meraki_api` (Cisco Meraki Dashboard API key), `ORDR_URL`, `ORDR_USER`, `ORDR_PASSWORD`, `ORDR_TENANTGUID` (Ordr SCE API), `ise_url`, `ise_user`, `ise_password` (Cisco ISE), `cat_url`, `cat_user`, `cat_password` (Cisco Catalyst Center).
@@ -421,7 +422,7 @@ Summarize the results for the user. Show raw JSON only when they ask for it.
 
 ## Vault login
 
-The helpers reuse `VAULT_TOKEN` or `~/.vault-token`. If neither is valid, it opens a browser OIDC login and saves the new token to `~/.vault-token`. To log in beforehand:
+The helpers reuse `VAULT_TOKEN` or `~/.vault-token`. If neither is valid, it opens a browser OIDC login and saves the new token to `~/.vault-token`. The Vault address always comes from `VAULT_ADDR` in `.env`. To log in beforehand with the Vault CLI directly:
 
 ```powershell
 $env:VAULT_ADDR = "<value of VAULT_ADDR in .env>"
@@ -431,8 +432,8 @@ vault login -method=oidc
 **If the normal login picks the wrong Microsoft account** (for example a Sapphire account, which fails with `samaccountname not found`), use the private-browser login scripts. Each one runs `vault login -method=oidc -no-print`, opens the login URL in a private window, and saves the token to `~/.vault-token`:
 
 ```
-powershell -ExecutionPolicy Bypass -File .\vault_login.ps1      # Windows: Edge InPrivate (-Browser chrome|firefox, -Prompt login)
-./vault_login.sh                                               # macOS: Chrome incognito (-b edge|firefox, -p login)
+powershell -ExecutionPolicy Bypass -File .\vault_login.ps1      # Windows: Edge InPrivate (-Browser chrome|firefox, -Prompt login, -NoPersist); saves VAULT_ADDR permanently
+./vault_login.sh                                               # macOS / Linux: Chrome incognito (-b edge|firefox, -p login, -n); saves VAULT_ADDR to the shell profile
 ```
 
 These are interactive. Ask the user to run them, or run one only when the user asks, because the user has to finish the sign-in in the browser.

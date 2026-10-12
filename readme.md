@@ -21,15 +21,13 @@ The examples below use placeholder names and addresses (`site1-wan-rtr-01`, `192
 1. Install the Vault CLI:
    - Windows: https://developer.hashicorp.com/vault/install
    - macOS: `brew tap hashicorp/tap && brew install hashicorp/tap/vault`
+   - Linux: the apt/dnf repository or zip from the same page
 2. Install the Python packages:
 
        python -m pip install -r requirements.txt
 
-3. Set the Vault address once (Windows), or export `VAULT_ADDR` in your shell profile (macOS):
-
-       setx VAULT_ADDR "https://<your-vault-host>:8200"
-
-4. Create `.env` with `VAULT_ADDR`, `VAULT_MOUNT`, `VAULT_PATH` and `LCMC_CACERT=certs/lcmc-epic-ca.pem`. The CA file lets Python trust the internal certificates that ISE and Catalyst Center use.
+3. Create `.env` with `VAULT_ADDR`, `VAULT_MOUNT`, `VAULT_PATH` and `LCMC_CACERT=certs/lcmc-epic-ca.pem`. The CA file lets Python trust the internal certificates that ISE and Catalyst Center use. `.env` is the only place the Vault address is kept, and it isn't committed to git.
+4. Log in once with `vault_login.ps1` (Windows) or `vault_login.sh` (macOS / Linux), as shown below. Both also save `VAULT_ADDR` from `.env` permanently, so the Vault CLI works in any new terminal.
 
 ## Logging in to Vault
 
@@ -39,8 +37,8 @@ A token lasts about 32 days, and every helper reuses it from `~/.vault-token`.
 
 If the browser signs in with the wrong Microsoft account (for example a xyzcorp account, which fails with `claim "samaccountname" not found`), log in from a private window instead:
 
-    powershell -ExecutionPolicy Bypass -File .\vault_login.ps1     # Windows (Edge InPrivate)
-    chmod +x vault_login.sh && ./vault_login.sh                   # macOS (Chrome incognito)
+    powershell -ExecutionPolicy Bypass -File .\vault_login.ps1     # Windows (Edge InPrivate); also saves VAULT_ADDR from .env permanently
+    chmod +x vault_login.sh && ./vault_login.sh                   # macOS / Linux (Chrome incognito); also saves VAULT_ADDR to your shell profile
     python vault_list.py --private --prompt login                 # any OS, also lists your Vault secrets (values hidden)
 
 ## netbox_helper.py — inventory

@@ -5,22 +5,27 @@
 #   powershell -ExecutionPolicy Bypass -File .\vault_login.ps1
 #   powershell -ExecutionPolicy Bypass -File .\vault_login.ps1 -Prompt login        # always ask for password
 #   powershell -ExecutionPolicy Bypass -File .\vault_login.ps1 -Browser chrome
+#   powershell -ExecutionPolicy Bypass -File .\vault_login.ps1 -NoPersist           # don't save VAULT_ADDR
 #
 # The token is saved to ~\.vault-token (the Vault CLI's default) and is never printed.
+# The Vault address (from .env) is also saved as a permanent user environment variable (VAULT_ADDR), so the
+# Vault CLI works in any new terminal. Use -NoPersist to skip that.
 
 param(
-    [string]$Address = $env:VAULT_ADDR,  # else VAULT_ADDR from .env next to this script
+    [string]$Address = "",  # default: VAULT_ADDR from .env next to this script, else $env:VAULT_ADDR
     [ValidateSet("select_account", "login", "none")]
     [string]$Prompt = "select_account",
     [ValidateSet("edge", "chrome", "firefox")]
     [string]$Browser = "edge",
     [string]$Role = "",
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 300,
+    [switch]$NoPersist
 )
 
 $ErrorActionPreference = "Stop"
 
-# The Vault address: -Address, else $env:VAULT_ADDR, else VAULT_ADDR in .env (not committed to git).
+# The Vault address: -Address, else VAULT_ADDR in .env (the source of truth; not committed to git),
+# else $env:VAULT_ADDR.
 if (-not $Address) {
     $envFile = Join-Path $PSScriptRoot ".env"
     if (Test-Path $envFile) {
@@ -28,7 +33,8 @@ if (-not $Address) {
         if ($line) { $Address = ($line -split '=', 2)[1].Trim().Trim('"').Trim("'") }
     }
 }
-if (-not $Address) { Write-Error "VAULT_ADDR is not set. Set it in the environment or in .env (VAULT_ADDR=https://<vault-host>:8200)." }
+if (-not $Address) { $Address = $env:VAULT_ADDR }
+if (-not $Address) { Write-Error "VAULT_ADDR is not set. Add it to .env (VAULT_ADDR=https://<vault-host>:8200)." }
 
 # Find the Vault CLI.
 $vault = (Get-Command vault -ErrorAction SilentlyContinue).Source
@@ -44,6 +50,17 @@ $browsers = @{
 $browserExe = $browsers[$Browser].Paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 
 $env:VAULT_ADDR = $Address
+
+# Save VAULT_ADDR permanently for this Windows user (user scope: no admin rights needed, survives reboots).
+if (-not $NoPersist) {
+    $current = [Environment]::GetEnvironmentVariable("VAULT_ADDR", "User")
+    if ($current -ne $Address) {
+        [Environment]::SetEnvironmentVariable("VAULT_ADDR", $Address, "User")
+        if ($current) { Write-Host "Updated the permanent VAULT_ADDR for $env:USERNAME (was $current)." }
+        else { Write-Host "Saved VAULT_ADDR permanently for $env:USERNAME. New terminals will pick it up." }
+    }
+}
+
 $out = [System.IO.Path]::GetTempFileName()
 $err = [System.IO.Path]::GetTempFileName()
 
