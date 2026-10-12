@@ -13,6 +13,7 @@ python netbox_helper.py devices --site Lakeside [--tag wan_router] [--role wan] 
 python netbox_helper.py device lakeview-wlc-ha01        # full record: site, role, model, serial, platform, primary IP, tags
 python netbox_helper.py ip 10.158.8.21                  # which device and interface has an IP
 python netbox_helper.py prefix 10.158.10.25             # prefixes (site, VLAN, VRF, role) containing an IP
+python netbox_helper.py prefixes --site Tulane [--vlan 700] [--vrf buyer] [--search text]   # subnet -> site list
 python netbox_helper.py tags
 ```
 
@@ -52,9 +53,10 @@ python cisco_helper.py locate <mac> -d <router or switch>  # MAC trace from a st
 
 `locate` does what you would do by hand, using only `show` commands:
 
-1. **NetBox** `prefix <ip>`: the subnet, its site, VLAN and VRF. `ip <ip>`: whether the IP is assigned to a device.
+1. **NetBox** `prefix <ip>`: the subnet, its site, VLAN and VRF. NetBox's prefix list is the subnet-to-site map, and `netbox_helper.py prefixes --site X` lists a site's subnets. A subnet can appear twice, once with the site in the global VRF and once in VRF `buyer` with no site, and the helper takes the site from the row that has one. `ip <ip>`: whether the IP is assigned to a device.
 2. **Route lookup on the `wan_router` devices** at that site (or on every `wan_router` if the site has none, or none of them has a specific route, because NetBox's site can be stale). Then follow the next hop router by router, finding each next hop's device in NetBox, until a device has the subnet **directly connected**. That device is the gateway, usually the site core.
 3. **`show ip arp <ip>`** on the gateway gives the MAC and the SVI.
+   If that finds nothing, the subnet may be an **isolated network**. The helper then asks the cores at Lakeview Hospital, Lakeside and Tulane directly in VRF `div` and in the global table, starting with NetBox's site (see "VRFs on the cores").
 4. **`show mac address-table address <mac>`** gives the port. If the port is a port-channel, the helper finds its members (`show etherchannel summary`). **`show cdp neighbors <port> detail`** shows what is on that port. If it is another Cisco switch, the helper connects to it (looked up by name in NetBox, else by its CDP IP) and repeats. The trace stops at the first port with no switch behind it, the access port, and shows it with `show interfaces <port> status`.
 
 It reports the gateway, the MAC (Cisco and colon formats), each L2 hop and the final switch, port, VLAN and port status. Its notes cover the cases where the trace stops early:
@@ -63,10 +65,14 @@ It reports the gateway, the MAC (Cisco and colon formats), each L2 hop and the f
 - **Meraki** device: continue with `meraki_helper.py client <mac>`.
 - A next hop that doesn't answer SSH (a firewall or a non-Cisco device): get the MAC from Ordr or ISE, then run `locate <mac> -d <last router>`.
 - An ARP entry with no MAC-table entry: the host has been idle, so try again later.
+- **Isolated network**: the subnet is in VRF `div` or the global table on a core and isn't routed to the WAN.
+- **NetBox site mismatch**: the device that really has the subnet is at a different site than NetBox says. Tell the user, because NetBox's prefix record needs fixing.
 
 Then take the MAC to Ordr or ISE to say what the device is. Exit codes: 0 = switchport found, 1 = not found, 2 = setup error.
 
 **VRFs on the cores:** at **Lakeview Hospital, Lakeside and Tulane**, user and server subnets live in VRF **`buyer`**, and **only on the core switches** (NetBox role `Core`, e.g. `lv-mdf-core-9500(1)`, `ls-mdf-core-9500(1)`, `tul-mdf-core-9606(1)`). The WAN routers at those sites use the global table. `cisco_helper.py` handles this for you (`CORE_VRFS` in the code): route and ARP lookups on those cores use VRF `buyer` only and skip every other VRF, unless you pass `--vrf`. In the global table those cores show other routes, such as a static route to a firewall for the server VLAN, and those routes are wrong for this purpose. To add a site, add it to `CORE_VRFS`.
+
+On those same cores, **VRF `div` and the global (default) table are for isolated networks**, which aren't routed to the WAN. `locate` looks there only after the normal trace finds nothing (`CORE_ISOLATED_VRFS`), and labels the result `isolated`. To look in one of them yourself, pass `--vrf div`, or `--vrf global` for the global table: `python cisco_helper.py route 10.67.240.11 -d "lv-mdf-core-9500(1)" --vrf global`.
 
 ## Files
 
@@ -74,7 +80,7 @@ Then take the MAC to Ordr or ISE to say what the device is. Exit codes: 0 = swit
 |---|---|
 | `cisco_helper.py` | Read-only show commands on Cisco devices over SSH (uptime, interfaces, config sections, logs, neighbors, BGP/OSPF/EIGRP, ARP/MAC, CPU/memory, route lookups and any `show` command), plus `locate <ip\|mac>` (traces an IP to its switchport). Use it for everything run on a device |
 | `vault_helper.py` | Vault login (token from `VAULT_TOKEN`, then `~/.vault-token`, then OIDC browser login), `get_secrets()` (router and NetBox credentials) and `get_secret(key)` (any one key, e.g. `meraki_api`) |
-| `netbox_helper.py` | **The inventory.** CLI: `sites`, `devices`, `device`, `ip`, `prefix`, `tags`. Also `get_devices()` (used by `cisco_helper.py`) and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
+| `netbox_helper.py` | **The inventory.** CLI: `sites`, `devices`, `device`, `ip`, `prefix`, `prefixes`, `tags`. Also `get_devices()` (used by `cisco_helper.py`) and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `catalyst_helper.py` | Read-only Cisco Catalyst Center (DNA Center) client and CLI (`devices`, `device`, `count`, `interfaces`, `config`, `client`, `sites`, `health`, `device-health`, `issues`, `get <path>`). Use it for all Catalyst Center access |
 | `ise_helper.py` | Read-only Cisco ISE client and CLI for the ERS, MnT and OpenAPI interfaces (`lookup`, `session`, `auth`, `active`, `nad`, `nads`, `groups`, `nodes`, `policy-sets`, `ers`, `mnt`, `api`). Use it for all ISE access |
 | `ordr_helper.py` | Read-only Ordr SCE REST API client and CLI (`device`, `devices`, `alarms`, `vulns`, `summary`, `reports`, `report`, `get <path>`). Use it for all Ordr access |

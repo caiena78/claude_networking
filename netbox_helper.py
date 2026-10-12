@@ -186,14 +186,40 @@ def ip_lookup(nb: pynetbox.api, ip: str) -> list[dict[str, Any]]:
 def prefix_lookup(nb: pynetbox.api, value: str) -> list[dict[str, Any]]:
     """Prefixes containing an IP (or equal to / inside a given prefix), most specific first."""
     flt = {"q": value} if "/" in value else {"contains": value}
-    rows = []
-    for p in nb.ipam.prefixes.filter(**flt):
-        rows.append({
-            "prefix": str(p.prefix), "status": _slug(p.status), "site": _slug(getattr(p, "site", None) or getattr(p, "scope", None)),
-            "vlan": f"{p.vlan.vid} {p.vlan.name}" if p.vlan else "", "vrf": _slug(p.vrf),
-            "role": _slug(p.role), "tenant": _slug(p.tenant), "description": p.description or "",
-        })
+    rows = [_prefix_row(p) for p in nb.ipam.prefixes.filter(**flt)]
     return sorted(rows, key=lambda r: -int(r["prefix"].split("/")[1]))
+
+
+def _prefix_row(p: Any) -> dict[str, Any]:
+    return {
+        "prefix": str(p.prefix), "status": _slug(p.status), "site": _slug(getattr(p, "site", None) or getattr(p, "scope", None)),
+        "vlan": f"{p.vlan.vid} {p.vlan.name}" if p.vlan else "", "vrf": _slug(p.vrf),
+        "role": _slug(p.role), "tenant": _slug(p.tenant), "description": p.description or "",
+    }
+
+
+def prefixes(nb: pynetbox.api, site: str | None = None, vlan: str | None = None, vrf: str | None = None,
+             role: str | None = None, search: str | None = None) -> list[dict[str, Any]]:
+    """Every prefix (subnet) matching the filters, in address order: the subnet -> site map.
+
+    site: name, slug or unique part of a name. vlan: VLAN ID. vrf: VRF name. search: free text (prefix,
+    description...)."""
+    flt: dict[str, Any] = {}
+    if site:
+        flt["site"] = resolve_site(nb, site)
+    if vlan:
+        flt["vlan_vid"] = vlan
+    if vrf:
+        flt["vrf"] = vrf
+    if role:
+        flt["role"] = role
+    if search:
+        flt["q"] = search
+    rows = [_prefix_row(p) for p in (nb.ipam.prefixes.filter(**flt) if flt else nb.ipam.prefixes.all())]
+    import ipaddress
+
+    return sorted(rows, key=lambda r: ipaddress.ip_network(r["prefix"], strict=False).network_address.packed
+                  + bytes([int(r["prefix"].split("/")[1])]))
 
 
 def sites(nb: pynetbox.api, name_contains: str | None = None) -> list[dict[str, Any]]:
@@ -243,6 +269,12 @@ def main() -> int:
     p.add_argument("address")
     p = sub.add_parser("prefix", help="prefixes containing an IP, or matching a prefix")
     p.add_argument("value")
+    p = sub.add_parser("prefixes", help="list subnets and the site each belongs to (filter by site, VLAN, VRF, text)")
+    p.add_argument("--site", help="site name, slug or unique part of a name")
+    p.add_argument("--vlan", help="VLAN ID")
+    p.add_argument("--vrf", help="VRF name")
+    p.add_argument("--role", help="prefix role slug")
+    p.add_argument("--search", help="free text: prefix, description...")
     sub.add_parser("tags", help="list tags")
     # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
     for subparser in sub.choices.values():
@@ -270,6 +302,12 @@ def main() -> int:
             _print(ip_lookup(nb, args.address), args.json, ["address", "device", "interface", "vrf", "status", "dns_name", "description"])
         elif args.cmd == "prefix":
             _print(prefix_lookup(nb, args.value), args.json, ["prefix", "site", "vlan", "vrf", "role", "status", "description"])
+        elif args.cmd == "prefixes":
+            if not (args.site or args.vlan or args.vrf or args.role or args.search):
+                print("give at least one of --site, --vlan, --vrf, --role, --search (there are ~4000 prefixes)", file=sys.stderr)
+                return 2
+            _print(prefixes(nb, args.site, args.vlan, args.vrf, args.role, args.search), args.json,
+                   ["prefix", "site", "vlan", "vrf", "role", "status", "description"])
         elif args.cmd == "tags":
             _print(tags(nb), args.json, ["name", "slug", "items", "description"])
     except ValueError as exc:

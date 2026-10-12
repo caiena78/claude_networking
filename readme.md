@@ -51,6 +51,7 @@ If the browser signs in with the wrong Microsoft account (for example a xyzcorp 
     python netbox_helper.py device site1-wlc-01                      # full record: model, serial, platform, IP, tags
     python netbox_helper.py ip 192.0.2.21                            # which device and interface has an IP
     python netbox_helper.py prefix 192.0.2.25                        # prefixes containing an IP (site, VLAN, VRF)
+    python netbox_helper.py prefixes --site Branch-01 [--vlan 10] # subnets and the site each belongs to
     python netbox_helper.py tags
 
 ## cisco_helper.py — show commands on Cisco devices

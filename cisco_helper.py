@@ -119,6 +119,11 @@ ROUTE_ERROR = re.compile(r"% ?Invalid input|syntax error|% ?Incomplete command|%
 CORE_VRFS = {"Lakeview Hospital": "buyer", "Lakeside": "buyer", "Tulane": "buyer"}
 
 
+# On those cores, these VRFs ("" = the global table) hold isolated networks that are not routed to the WAN.
+# locate only looks there when the normal WAN-router trace finds nothing.
+CORE_ISOLATED_VRFS = ["div", ""]
+
+
 def default_vrf(device: dict[str, Any]) -> str | None:
     """The VRF to use for route/ARP lookups on a device when none was given (see CORE_VRFS)."""
     if (device.get("role") or "").lower() == "core":
@@ -485,7 +490,8 @@ class CiscoRunner:
                     raise CiscoError("'ssid' needs an SSID name")
                 command = f"ssid {arg} (show wlan summary, running-config sections, show wlan name)"
             elif command_name == "route" and arg:
-                vrf = vrf or default_vrf(device)
+                if vrf is None:  # "" means the global table
+                    vrf = default_vrf(device)
                 result["vrf"] = vrf or ""
                 command = validate_show(route_command(device["device_type"], parse_route_target(arg), vrf))
             else:
@@ -591,22 +597,23 @@ class CiscoRunner:
         site_scoped = bool(candidates) and not start
         if not candidates:
             candidates = self.resolve(tag="wan_router")
-        looked: dict[str, dict[str, Any]] = {}  # host -> route step, so each device is asked once
+        looked: dict[tuple, dict[str, Any]] = {}  # (host, vrf) -> route step, so each lookup runs once
 
-        def lookup(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            new = [d for d in devices if d["host"] not in looked]
+        def lookup(devices: list[dict[str, Any]], use_vrf: str | None = vrf, label: str = "") -> list[dict[str, Any]]:
+            new = [d for d in devices if (d["host"], use_vrf) not in looked]
             if new:
-                log(f"route lookup for {ip} on {', '.join(d['name'] for d in new)}")
-                for r in self.run(new, "route", ip, vrf=vrf):
+                where = "" if use_vrf is None else f" ({'VRF ' + use_vrf if use_vrf else 'global table'})"
+                log(f"route lookup for {ip}{where} on {', '.join(d['name'] for d in new)}")
+                for r in self.run(new, "route", ip, vrf=use_vrf):
                     dev = next(d for d in new if d["host"] == r["host"])
                     detail = r.get("route_detail") or {}
                     step = {"device": r["device"], "host": r["host"], "vrf": r.get("vrf") or "",
                             "result": r.get("route_result") or "error", "error": r["error"],
                             "prefix": detail.get("prefix", ""), "protocol": detail.get("protocol", ""),
-                            "next_hops": detail.get("next_hops", []), "_device": dev}
-                    looked[r["host"]] = step
+                            "next_hops": detail.get("next_hops", []), "note": label, "_device": dev}
+                    looked[(r["host"], use_vrf)] = step
                     result["route_path"].append(step)
-            return [looked[d["host"]] for d in devices]
+            return [looked[(d["host"], use_vrf)] for d in devices]
 
         def connected(step: dict[str, Any]) -> bool:
             return step["result"] == "found" and any(h["next_hop"] == "connected" for h in step["next_hops"])
@@ -656,6 +663,24 @@ class CiscoRunner:
                                        f"({'VRF ' + nxt['vrf'] if nxt['vrf'] else 'global table'})")
                 break
             current = nxt
+        if not gateways and vrf is None:
+            # Isolated networks: on the CORE_VRFS cores, VRF div and the global table hold networks that are not
+            # routed to the WAN, so a WAN trace never finds them. Ask those cores directly, NetBox's site first.
+            sites = sorted(CORE_VRFS, key=lambda name: name != site)
+            for core_site in sites:
+                found, _ = netbox_helper.get_devices(self.nb, tag=None, site=core_site, role="core")
+                cores = [d for d in found if is_ip(d["host"])]
+                for iso_vrf in CORE_ISOLATED_VRFS:
+                    hit = next((s for s in lookup(cores, iso_vrf, "isolated") if connected(s)), None)
+                    if hit:
+                        gw_if = next(h["interface"] for h in hit["next_hops"] if h["next_hop"] == "connected")
+                        gateways.append({**hit["_device"], "interface": gw_if, "prefix": hit["prefix"], "vrf": iso_vrf})
+                        result["notes"].append(
+                            f"{ip} is on an isolated network ({'VRF ' + iso_vrf if iso_vrf else 'global table'}) on "
+                            f"{hit['device']} at {core_site}: it is not routed to the WAN")
+                        break
+                if gateways:
+                    break
         if not gateways:
             if "meraki" in site.lower():
                 result["notes"].append(f"NetBox puts this prefix at site {site!r}: it is behind a Meraki MX. "
@@ -667,11 +692,15 @@ class CiscoRunner:
             return result
         for s in result["route_path"]:
             s.pop("_device", None)
+        gw_site = gateways[0].get("site") or ""
+        if site and gw_site and gw_site != site:
+            result["notes"].append(f"NetBox puts {result['netbox_prefix'][0]['prefix']} at site {site!r}, but it is "
+                                   f"connected on {gateways[0]['name']} at {gw_site!r}: NetBox's site looks wrong")
 
         # Step 3: ARP on the gateway(s); HSRP pairs both have the subnet connected, so try each.
         arp = None
         for gw in gateways:
-            gw_vrf = vrf or gw.get("vrf") or default_vrf(gw)
+            gw_vrf = vrf if vrf is not None else (gw["vrf"] if "vrf" in gw else default_vrf(gw))
             command = validate_show(f"show ip arp {'vrf ' + gw_vrf + ' ' if gw_vrf else ''}{ip}")
             try:
                 with self.connect(gw) as conn:
@@ -786,6 +815,8 @@ def format_locate(r: dict[str, Any]) -> str:
     for step in r["route_path"]:
         hops = "; ".join(f"{h['next_hop']} via {h.get('interface') or '?'}" for h in step["next_hops"])
         vrf_label = f"[vrf {step['vrf']}] " if step.get("vrf") else ""
+        if step.get("note") == "isolated":
+            vrf_label = f"[isolated: {'vrf ' + step['vrf'] if step['vrf'] else 'global'}] "
         lines.append(f"  route           {step['device']:<22} {step['result']:<9} {vrf_label}{step['prefix']} {step['protocol']} {hops}"
                      .rstrip() + (f"  {step['error']}" if step["error"] and step["result"] != "found" else ""))
     if r["gateway"]:
@@ -879,6 +910,8 @@ def main() -> int:
         return 0
 
     if args.command == "locate":
+        if args.vrf and args.vrf.lower() in ("global", "default"):
+            args.vrf = ""
         return locate_main(args)
 
     raw_command = None
@@ -891,6 +924,8 @@ def main() -> int:
         print(f"unknown command {args.command!r}; run 'python cisco_helper.py list'", file=sys.stderr)
         return 2
 
+    if args.vrf and args.vrf.lower() in ("global", "default"):
+        args.vrf = ""  # the global routing table, even on cores that default to a VRF
     route_lookup = args.command == "route" and bool(args.arg)
     if route_lookup:
         try:
