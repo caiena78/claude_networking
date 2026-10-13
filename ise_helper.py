@@ -30,16 +30,17 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import json
 import os
 import re
 import sys
 import time
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlparse
 
 import requests
+
+from helper_common import Out, table, to_json
 
 SECRET_KEYS = ("ise_url", "ise_user", "ise_password")
 ERS_PORT = 9060
@@ -289,6 +290,16 @@ class ISE:
         flt = f"name.CONTAINS.{name_contains}" if name_contains else None
         return self.ers_search("networkdevice", filter=flt, max_items=max_items)
 
+    def network_device_details(self, name_contains: str | None = None, max_items: int | None = None,
+                               workers: int = 8) -> list[dict]:
+        """Full NAD records (groups, profile, model, IPs). One ERS GET per device, so use max_items
+        on the full list (about 1,200 NADs)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        ids = [r["id"] for r in self.network_devices(name_contains, max_items)]
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            return list(pool.map(lambda i: self.ers_get("networkdevice", i), ids))
+
     def endpoint_groups(self) -> list[dict]:
         return self.ers_search("endpointgroup")
 
@@ -312,18 +323,74 @@ class ISE:
 # CLI
 # ---------------------------------------------------------------------------
 
-def _print(data: Any, as_json: bool = True, columns: list[str] | None = None) -> None:
-    if as_json or not isinstance(data, list) or not data or not columns or not isinstance(data[0], dict):
-        print(json.dumps(data, indent=2, default=str))
+def _emit(out: Out, args: argparse.Namespace, data: Any, columns: list[str] | None = None, width: int = 60) -> None:
+    """A table when columns are given and the data is a list (unless --json), else indented JSON."""
+    if args.json or not columns or not isinstance(data, list):
+        out.add(to_json(data))
+    else:
+        out.add(table(data, columns, width))
+        print(f"\n{len(data)} row(s)", file=sys.stderr)
+
+
+def count_by(rows: list[dict], key: str | Callable[[dict], Any], limit: int | None = None) -> list[dict]:
+    """[{value, count}] for a field (or a function of each row), most common first; blanks become '(none)'."""
+    from collections import Counter
+
+    get = key if callable(key) else (lambda r: r.get(key))
+    counts = Counter(("(none)" if get(r) in (None, "") else str(get(r))) for r in rows)
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"value": v, "count": c} for v, c in (ranked[:limit] if limit else ranked)]
+
+
+def summarize_sessions(sessions: list[dict], limit: int | None = None) -> dict[str, Any]:
+    """Counts over the MnT active-session list. Its rows only have user_name, calling_station_id,
+    framed_ip_address, nas_ip_address, server (the PSN) and audit_session_id, so the summary is by PSN
+    and by NAS IP (the switch/WLC), plus how many sessions have a username and an IP."""
+    return {
+        "active_sessions": len(sessions),
+        "with_user": sum(1 for s in sessions if s.get("user_name")),
+        "with_ip": sum(1 for s in sessions if s.get("framed_ip_address")),
+        "by_server": count_by(sessions, "server", limit),
+        "by_nas_ip": count_by(sessions, "nas_ip_address", limit),
+    }
+
+
+def nad_groups(nad: dict) -> dict[str, str]:
+    """A NAD's network device groups as {group type: value}.
+    'Location#All Locations#TLS' -> {'Location': 'TLS'}; 'DNAC#DNAC Devices' -> {'DNAC': 'DNAC Devices'};
+    deeper paths keep their tail, e.g. 'Location#All Locations#UMC#B1' -> 'UMC#B1'."""
+    groups: dict[str, str] = {}
+    for entry in nad.get("NetworkDeviceGroupList") or []:
+        parts = str(entry).split("#")
+        if len(parts) >= 3:
+            groups[parts[0]] = "#".join(parts[2:])
+        elif len(parts) == 2:
+            groups[parts[0]] = parts[1]
+    return groups
+
+
+def summarize_nads(nads: list[dict], limit: int | None = None) -> dict[str, Any]:
+    """Counts over full NAD records: by each network device group type (Location, Device Type, IPSEC...),
+    by profile (profileName) and by model (modelName)."""
+    grouped = [nad_groups(n) for n in nads]
+    types = sorted({t for g in grouped for t in g})
+    summary: dict[str, Any] = {"nads": len(nads)}
+    for t in types:
+        summary[f"by_{t.lower().replace(' ', '_')}"] = count_by(grouped, t, limit)
+    summary["by_profile"] = count_by(nads, "profileName", limit)
+    summary["by_model"] = count_by(nads, "modelName", limit)
+    return summary
+
+
+def _emit_summary(out: Out, args: argparse.Namespace, summary: dict[str, Any]) -> None:
+    """Totals on one line, then a value/count table per by_* list (or the dict as JSON with --json)."""
+    if args.json:
+        out.add(to_json(summary))
         return
-    rows = [[("" if item.get(c) is None else str(item.get(c)))[:60] for c in columns] for item in data]
-    widths = [max(len(x) for x in col) for col in zip(columns, *rows)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*columns))
-    print(fmt.format(*("-" * w for w in widths)))
-    for row in rows:
-        print(fmt.format(*row))
-    print(f"\n{len(data)} row(s)", file=sys.stderr)
+    out.add("  ".join(f"{k}={v}" for k, v in summary.items() if not isinstance(v, list)) + "\n")
+    for key, rows in summary.items():
+        if isinstance(rows, list):
+            out.section(key, table(rows, ["value", "count"], width=80))
 
 
 def _session_view(session: dict | None, full: bool) -> Any:
@@ -335,6 +402,8 @@ def _session_view(session: dict | None, full: bool) -> Any:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only Cisco ISE helper (ERS, MnT, OpenAPI).")
     parser.add_argument("--json", action="store_true", help="Print full records / raw JSON")
+    parser.add_argument("-o", "--output", help="Also write the output to this file")
+    parser.add_argument("--append", action="store_true", help="With -o: append instead of overwriting")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("lookup", help="Endpoint record + live session for a MAC")
@@ -349,12 +418,18 @@ def main() -> int:
     p.add_argument("--count", action="store_true", help="Only print the number of active sessions")
     p.add_argument("--protocols", action="store_true",
                    help="Count active sessions by auth protocol (EAP-TLS, PEAP...) and method (dot1x, mab)")
-    p.add_argument("--limit", type=int, default=50, help="Max sessions to print (default 50; 0 = all)")
+    p.add_argument("--summary", action="store_true",
+                   help="Counts over all active sessions: totals, by PSN (server) and by NAS IP")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Max sessions to print (default 50; 0 = all). With --summary: max rows per count (default all)")
     p = sub.add_parser("nad", help="Network device(s) by IP or name substring")
     p.add_argument("value")
     p = sub.add_parser("nads", help="List network devices (id, name)")
     p.add_argument("--name", help="Only names containing this text")
     p.add_argument("--limit", type=int, default=0, help="Max devices (default all)")
+    p.add_argument("--summary", action="store_true",
+                   help="Fetch each NAD's full record and count by device group (Location, Device Type...), "
+                        "profile and model. One API call per NAD, so slow on the full list; use --name/--limit")
     sub.add_parser("groups", help="Endpoint identity groups")
     sub.add_parser("nodes", help="ISE deployment nodes (OpenAPI)")
     p = sub.add_parser("policy-sets", help="Policy sets (OpenAPI)")
@@ -367,46 +442,56 @@ def main() -> int:
     p.add_argument("path")
     p = sub.add_parser("api", help="GET any OpenAPI path, e.g. deployment/node")
     p.add_argument("path")
-    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    # Accept --json/-o/--append after the subcommand too (SUPPRESS keeps a value given before it).
     for subparser in sub.choices.values():
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
+        subparser.add_argument("-o", "--output", default=argparse.SUPPRESS, help="also write the output to this file")
+        subparser.add_argument("--append", action="store_true", default=argparse.SUPPRESS, help="with -o: append")
     args = parser.parse_args()
 
     ise = ISE()
+    out = Out()
     if args.cmd == "lookup":
         result = ise.lookup(args.mac)
         result["session"] = _session_view(result["session"], args.json)
-        _print(result)
+        _emit(out, args, result)
     elif args.cmd == "session":
-        _print(_session_view(ise.session(args.value), args.json))
+        _emit(out, args, _session_view(ise.session(args.value), args.json))
     elif args.cmd == "auth":
         rows = ise.auth_status(args.mac, args.hours, args.records)
-        _print(rows if args.json else [_session_view(r, False) for r in rows])
+        _emit(out, args, rows if args.json else [_session_view(r, False) for r in rows])
     elif args.cmd == "active":
         if args.count:
-            print(ise.active_count())
+            out.add(str(ise.active_count()))
         elif args.protocols:
-            _print(ise.session_protocols())
+            _emit(out, args, ise.session_protocols())
+        elif args.summary:
+            _emit_summary(out, args, summarize_sessions(ise.active_sessions(), args.limit or None))
         else:
-            _print(ise.active_sessions(args.limit or None), args.json,
-                   ["user_name", "calling_station_id", "framed_ip_address", "nas_ip_address", "server"])
+            limit = 50 if args.limit is None else args.limit
+            _emit(out, args, ise.active_sessions(limit or None),
+                  ["user_name", "calling_station_id", "framed_ip_address", "nas_ip_address", "server"], width=60)
     elif args.cmd == "nad":
-        _print(ise.network_device(args.value))
+        _emit(out, args, ise.network_device(args.value))
     elif args.cmd == "nads":
-        _print(ise.network_devices(args.name, args.limit or None), args.json, ["name", "description", "id"])
+        if args.summary:
+            _emit_summary(out, args, summarize_nads(ise.network_device_details(args.name, args.limit or None)))
+        else:
+            _emit(out, args, ise.network_devices(args.name, args.limit or None), ["name", "description", "id"], width=80)
     elif args.cmd == "groups":
-        _print(ise.endpoint_groups(), args.json, ["name", "description", "id"])
+        _emit(out, args, ise.endpoint_groups(), ["name", "description", "id"], width=100)
     elif args.cmd == "nodes":
-        _print(ise.nodes())
+        _emit(out, args, ise.nodes())
     elif args.cmd == "policy-sets":
-        _print(ise.policy_sets(args.device_admin))
+        _emit(out, args, ise.policy_sets(args.device_admin))
     elif args.cmd == "ers":
-        _print(ise.ers_get(args.resource, args.id) if args.id else ise.ers_search(args.resource, filter=args.filter),
-               args.json or bool(args.id), ["name", "description", "id"])
+        data = ise.ers_get(args.resource, args.id) if args.id else ise.ers_search(args.resource, filter=args.filter)
+        _emit(out, args, data, ["name", "description", "id"], width=100)
     elif args.cmd == "mnt":
-        _print(ise.mnt(args.path))
+        _emit(out, args, ise.mnt(args.path))
     elif args.cmd == "api":
-        _print(ise.api(args.path))
+        _emit(out, args, ise.api(args.path))
+    out.save(args.output, args.append)
     return 0
 
 

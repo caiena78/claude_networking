@@ -32,9 +32,11 @@ python ise_helper.py session 10.158.10.25             # live session by MAC, IP 
 python ise_helper.py auth 00:11:22:33:44:55 --hours 24   # recent authentications (max 120 h)
 python ise_helper.py active --count                   # number of active sessions
 python ise_helper.py active --protocols               # active sessions by auth protocol (EAP-TLS, PEAP...) and method (dot1x/mab)
-python ise_helper.py active --limit 20                # sample of active sessions
+python ise_helper.py active --limit 20                # sample of active sessions (default 50, 0 = all)
+python ise_helper.py active --summary [--limit 10]    # totals (sessions, with user, with IP), counts by PSN and by NAS IP
 python ise_helper.py nad 10.158.136.51                # network device by IP, or name substring
-python ise_helper.py nads --name wan                  # list NADs (id, name)
+python ise_helper.py nads --name wan [--limit N]       # list NADs (id, name)
+python ise_helper.py nads --summary --name tls        # counts by device group (Location, Device Type, IPSEC, DNAC), profile, model
 python ise_helper.py groups                           # endpoint identity groups
 python ise_helper.py nodes                            # deployment nodes and roles
 python ise_helper.py policy-sets [--device-admin]
@@ -43,6 +45,9 @@ python ise_helper.py mnt Session/ActiveCount          # any MnT path
 python ise_helper.py api deployment/node              # any OpenAPI path
 ```
 
+- Every command takes `-o FILE` (also write the output to a file) and `--append`; `--json`, `-o` and `--append` work before or after the subcommand.
+- `active --summary` covers all active sessions. The active list only has user, MAC, framed IP, NAS IP and PSN (`server`), so it counts by PSN and NAS IP; `--limit` caps the rows per count. For auth protocol/method use `active --protocols` (one lookup per session, slower).
+- `nads --summary` fetches each NAD's full record (one ERS call each; there are about 1,200 NADs, so narrow with `--name` or `--limit`). Group values are the tail of the NDG path, e.g. `Location#All Locations#TLS` -> `TLS`.
 - `session`, `lookup` and `auth` show only the key fields by default: user, MAC, IP, NAD name and IP, port, endpoint profile, identity group, authorization profile, auth method and protocol, posture, SGT, PSN and timestamp. Add `--json` for everything.
 - `session` returns `null` when the endpoint has no active session. Use `auth` to see recent attempts, including failures.
 - ERS filters use the form `<field>.<OP>.<value>`, where OP is EQ, NEQ, CONTAINS, STARTSW and so on. Examples: `mac.EQ.AA:BB:CC:DD:EE:FF`, `name.CONTAINS.wan`, `ipaddress.EQ.10.1.1.1`.

@@ -10,17 +10,20 @@ From the command line:
     python netbox_helper.py ip 10.158.8.21                    # which device/interface has an IP
     python netbox_helper.py prefix 10.158.10.25               # prefixes containing an IP (or a prefix itself)
     python netbox_helper.py tags
+    python netbox_helper.py devices --site Lakeside --summary [role,model]   # counts instead of rows
+    Every command takes -o FILE [--append] to also save the output.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from typing import Any
 
 import pynetbox
 import requests
+
+from helper_common import Out, table, to_json
 
 # NetBox platform slug -> netmiko device_type. Add new platforms here.
 PLATFORM_MAP: dict[str, str] = {
@@ -335,18 +338,21 @@ def tags(nb: pynetbox.api) -> list[dict[str, Any]]:
 # CLI
 # ---------------------------------------------------------------------------
 
-def _print(rows: Any, as_json: bool, columns: list[str] | None = None) -> None:
+def _print(out: Out, rows: Any, as_json: bool, columns: list[str] | None = None) -> None:
     if as_json or not isinstance(rows, list) or not rows or not columns:
-        print(json.dumps(rows, indent=2, default=str))
+        out.add(to_json(rows))
         return
-    table = [[str(r.get(c, "") if r.get(c) is not None else "")[:45] for c in columns] for r in rows]
-    widths = [max(len(x) for x in col) for col in zip(columns, *table)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*columns))
-    print(fmt.format(*("-" * w for w in widths)))
-    for row in table:
-        print(fmt.format(*row))
+    out.add(table(rows, columns))
     print(f"\n{len(rows)} row(s)", file=sys.stderr)
+
+
+def count_by(rows: list[dict], fields: list[str]) -> list[dict]:
+    """Count rows by the values of fields, most common first."""
+    counts: dict[tuple, int] = {}
+    for r in rows:
+        key = tuple("" if r.get(f) is None else str(r.get(f)) for f in fields)
+        counts[key] = counts.get(key, 0) + 1
+    return [{**dict(zip(fields, k)), "count": c} for k, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
 def main() -> int:
@@ -361,6 +367,9 @@ def main() -> int:
     p.add_argument("--role", help="device role slug, e.g. router")
     p.add_argument("--name", help="device (or virtual chassis) names containing this text")
     p.add_argument("--members", action="store_true", help="list virtual chassis members separately")
+    p.add_argument("--summary", nargs="?", const="role,model", metavar="FIELDS",
+                   help="count devices instead of listing them, by comma-separated fields "
+                        "(default role,model; also site, platform, status)")
     p = sub.add_parser("vc", help="virtual chassis (switch stack) and its members: position, model, serial, IP")
     p.add_argument("name")
     p = sub.add_parser("device", help="full record for one device (exact name, else names containing the text)")
@@ -379,15 +388,18 @@ def main() -> int:
     # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
     for subparser in sub.choices.values():
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
+        subparser.add_argument("-o", "--output", help="also write the output to this file")
+        subparser.add_argument("--append", action="store_true", help="with -o: append")
     args = parser.parse_args()
 
     import vault_helper
 
     creds = vault_helper.get_secrets(interactive=False)
     nb = connect(creds["netbox_url"], creds["netbox_token"])
+    out = Out()
     try:
         if args.cmd == "sites":
-            _print(sites(nb, args.name), args.json, ["name", "slug", "status", "region", "facility", "description"])
+            _print(out, sites(nb, args.name), args.json, ["name", "slug", "status", "region", "facility", "description"])
         elif args.cmd == "devices":
             if not (args.site or args.tag or args.role or args.name):
                 print("give at least one of --site, --tag, --role, --name", file=sys.stderr)
@@ -396,35 +408,40 @@ def main() -> int:
                                          collapse_vc=not args.members)
             for d in found:
                 d["stack"] = f"{len(d['members'])} members" if d.get("vc") else ""
-            _print(found, args.json, ["name", "host", "site", "role", "model", "platform", "status", "stack"])
+            if args.summary:
+                fields = args.summary.split(",")
+                _print(out, count_by(found, fields), args.json, fields + ["count"])
+            else:
+                _print(out, found, args.json, ["name", "host", "site", "role", "model", "platform", "status", "stack"])
             for s in skipped:
                 print(f"skipped {s['name']}: {s['reason']}", file=sys.stderr)
         elif args.cmd == "vc":
             vcs = virtual_chassis(nb, args.name)
             if args.json or not vcs:
-                _print(vcs, True)
+                _print(out, vcs, True)
             for vc in ([] if args.json else vcs):
-                print(f"{vc['name']}  master {vc['master']}  members {vc['member_count']}"
-                      + (f"  domain {vc['domain']}" if vc["domain"] else ""))
-                _print(vc["members"], False, ["position", "name", "model", "serial", "primary_ip", "status", "site"])
-                print()
+                out.add(f"{vc['name']}  master {vc['master']}  members {vc['member_count']}"
+                        + (f"  domain {vc['domain']}" if vc["domain"] else ""))
+                _print(out, vc["members"], False, ["position", "name", "model", "serial", "primary_ip", "status", "site"])
+                out.add("")
         elif args.cmd == "device":
-            _print(device_record(nb, args.name), True)
+            _print(out, device_record(nb, args.name), True)
         elif args.cmd == "ip":
-            _print(ip_lookup(nb, args.address), args.json, ["address", "device", "interface", "vrf", "status", "dns_name", "description"])
+            _print(out, ip_lookup(nb, args.address), args.json, ["address", "device", "interface", "vrf", "status", "dns_name", "description"])
         elif args.cmd == "prefix":
-            _print(prefix_lookup(nb, args.value), args.json, ["prefix", "site", "vlan", "vrf", "role", "status", "description"])
+            _print(out, prefix_lookup(nb, args.value), args.json, ["prefix", "site", "vlan", "vrf", "role", "status", "description"])
         elif args.cmd == "prefixes":
             if not (args.site or args.vlan or args.vrf or args.role or args.search):
                 print("give at least one of --site, --vlan, --vrf, --role, --search (there are ~4000 prefixes)", file=sys.stderr)
                 return 2
-            _print(prefixes(nb, args.site, args.vlan, args.vrf, args.role, args.search), args.json,
+            _print(out, prefixes(nb, args.site, args.vlan, args.vrf, args.role, args.search), args.json,
                    ["prefix", "site", "vlan", "vrf", "role", "status", "description"])
         elif args.cmd == "tags":
-            _print(tags(nb), args.json, ["name", "slug", "items", "description"])
+            _print(out, tags(nb), args.json, ["name", "slug", "items", "description"])
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    out.save(args.output, args.append)
     return 0
 
 

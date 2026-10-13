@@ -23,6 +23,9 @@ From the command line:
     python catalyst_helper.py health
     python catalyst_helper.py issues --priority P1
     python catalyst_helper.py issues --summary            # counts by priority and kind
+    python catalyst_helper.py devices --summary [--by platformId]   # counts by family and reachability
+    python catalyst_helper.py device-health --summary     # counts by health band and device type
+    python catalyst_helper.py issues --summary -o issues.txt [--append]   # any command: also write to a file
     python catalyst_helper.py get dna/intent/api/v1/network-device/count
 """
 
@@ -30,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import json
 import os
 import re
 import sys
@@ -39,6 +41,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+
+from helper_common import Out, table, to_json
 
 SECRET_KEYS = ("cat_url", "cat_user", "cat_password")
 INTENT = "dna/intent/api/v1"
@@ -278,33 +282,73 @@ def issue_summary(issues: list[dict]) -> list[dict]:
             for (p, t), c in sorted(counts.items(), key=lambda kv: (kv[0][0], -kv[1], kv[0][1]))]
 
 
+def count_by(rows: list[dict], keys: list[str]) -> list[dict]:
+    """Count rows by the values of keys, most common first. Missing values count as "(none)"."""
+    counts: dict[tuple, int] = {}
+    for r in rows:
+        key = tuple("(none)" if r.get(k) in (None, "") else str(r.get(k)) for k in keys)
+        counts[key] = counts.get(key, 0) + 1
+    return [{**dict(zip(keys, k)), "count": c} for k, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def health_bucket(score: Any) -> str:
+    """Catalyst Center's health bands: 1-3 POOR, 4-7 FAIR, 8-10 GOOD; anything else (missing, -1, 0) NO DATA."""
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return "NO DATA"
+    if 8 <= value <= 10:
+        return "GOOD"
+    if 4 <= value < 8:
+        return "FAIR"
+    if 1 <= value < 4:
+        return "POOR"
+    return "NO DATA"
+
+
+def device_health_summary(rows: list[dict]) -> list[dict]:
+    """Count device-health rows by health band and deviceType."""
+    return count_by([{"health": health_bucket(r.get("overallHealth")), "deviceType": r.get("deviceType")} for r in rows],
+                    ["health", "deviceType"])
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def _print(data: Any, as_json: bool = True, columns: list[str] | None = None, width: int = 50) -> None:
-    if as_json or not isinstance(data, list) or not data or not columns or not isinstance(data[0], dict):
-        print(data if isinstance(data, str) else json.dumps(data, indent=2, default=str))
-        return
-    rows = [[("" if item.get(c) is None else str(item.get(c)))[:width] for c in columns] for item in data]
-    widths = [max(len(x) for x in col) for col in zip(columns, *rows)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*columns))
-    print(fmt.format(*("-" * w for w in widths)))
-    for row in rows:
-        print(fmt.format(*row))
-    print(f"\n{len(data)} row(s)", file=sys.stderr)
+DEVICE_HEALTH_COLUMNS = ["name", "ipAddress", "deviceType", "deviceFamily", "overallHealth", "reachabilityHealth", "location"]
+DEVICE_SUMMARY_KEYS = ["family", "reachabilityStatus"]
+
+
+def _emit(out: Out, args: argparse.Namespace, data: Any, columns: list[str] | None = None, width: int = 60) -> None:
+    """A table for a list of records, else JSON; --json always gives JSON. A string is printed as is."""
+    if isinstance(data, str):
+        out.add(data)
+    elif args.json or not columns or not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        out.add(to_json(data))
+    else:
+        out.add(table(data, columns, width))
+        print(f"\n{len(data)} row(s)", file=sys.stderr)
 
 
 def main() -> int:
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except AttributeError:
+        pass
     parser = argparse.ArgumentParser(description="Read-only Cisco Catalyst Center helper.")
     parser.add_argument("--json", action="store_true", help="Print full records / raw JSON")
+    parser.add_argument("-o", "--output", help="Also write the output to this file")
+    parser.add_argument("--append", action="store_true", help="With -o: append instead of overwriting")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("devices", help="List network devices")
     for flag in ("hostname", "family", "role", "platform", "version", "reachability", "location"):
         p.add_argument(f"--{flag}")
     p.add_argument("--limit", type=int, default=0, help="Max devices (default all)")
+    p.add_argument("--summary", action="store_true",
+                   help="Count devices (default by family and reachabilityStatus) instead of listing them")
+    p.add_argument("--by", help="With --summary: comma-separated fields to count by, e.g. platformId or role,family")
     p = sub.add_parser("device", help="One device by hostname, management IP, serial or id")
     p.add_argument("value")
     sub.add_parser("count", help="Number of devices in inventory")
@@ -320,7 +364,8 @@ def main() -> int:
     p = sub.add_parser("device-health", help="Device health scores")
     p.add_argument("--role", help="ACCESS, DISTRIBUTION, CORE, ROUTER, WLC, AP")
     p.add_argument("--health", choices=["POOR", "FAIR", "GOOD"])
-    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--limit", type=int, default=0, help="Max devices (default all)")
+    p.add_argument("--summary", action="store_true", help="Count devices by health band and deviceType")
     p = sub.add_parser("issues", help="Assurance issues")
     p.add_argument("--priority", choices=["P1", "P2", "P3", "P4"])
     p.add_argument("--status", default="ACTIVE", choices=["ACTIVE", "IGNORED", "RESOLVED"])
@@ -330,25 +375,34 @@ def main() -> int:
     p.add_argument("path")
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE", help="Query parameter; repeat for more")
     p.add_argument("--all", action="store_true", help="Page through with offset/limit")
-    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    # Accept --json/-o/--append after the subcommand too (SUPPRESS keeps a value given before it).
     for subparser in sub.choices.values():
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
+        subparser.add_argument("-o", "--output", default=argparse.SUPPRESS, help="also write the output to this file")
+        subparser.add_argument("--append", action="store_true", default=argparse.SUPPRESS, help="with -o: append")
     args = parser.parse_args()
 
     cc = Catalyst()
+    out = Out()
     if args.cmd == "devices":
         filters = {"hostname": args.hostname, "family": args.family, "role": args.role, "platformId": args.platform,
                    "softwareVersion": args.version, "reachabilityStatus": args.reachability, "locationName": args.location}
-        _print(cc.devices(max_items=args.limit or None, **{k: v for k, v in filters.items() if v}), args.json, DEVICE_COLUMNS)
+        rows = cc.devices(max_items=args.limit or None, **{k: v for k, v in filters.items() if v})
+        if args.summary:
+            keys = [k.strip() for k in args.by.split(",") if k.strip()] if args.by else DEVICE_SUMMARY_KEYS
+            out.add(f"{len(rows)} devices")
+            _emit(out, args, count_by(rows, keys), keys + ["count"], width=80)
+        else:
+            _emit(out, args, rows, DEVICE_COLUMNS)
     elif args.cmd == "device":
         found = cc.device(args.value)
-        _print(found, args.json or len(found) == 1, DEVICE_COLUMNS)
+        _emit(out, args, found[0] if len(found) == 1 else found, DEVICE_COLUMNS)
     elif args.cmd == "count":
-        print(cc.device_count())
+        out.add(str(cc.device_count()))
     elif args.cmd == "interfaces":
-        _print(cc.interfaces(args.device), args.json, INTERFACE_COLUMNS)
+        _emit(out, args, cc.interfaces(args.device), INTERFACE_COLUMNS, width=80)
     elif args.cmd == "config":
-        _print(cc.device_config(args.device))
+        _emit(out, args, cc.device_config(args.device))
     elif args.cmd == "client":
         c = cc.client(args.mac)
         if c and not args.json and "connectedNetworkDevice" in c:
@@ -360,27 +414,32 @@ def main() -> int:
                  "connectedToType": dev.get("connectedNetworkDeviceType"), "interface": dev.get("interfaceName"),
                  "ssid": (c.get("connection") or {}).get("ssid"), "vlan": (c.get("connection") or {}).get("vlanId"),
                  "healthScore": (c.get("health") or {}).get("overallScore"), "lastUpdated": c.get("lastUpdatedTime")}
-        _print(c)
+        _emit(out, args, c)
     elif args.cmd == "sites":
-        _print(cc.sites(args.name), args.json, SITE_COLUMNS)
+        _emit(out, args, cc.sites(args.name), SITE_COLUMNS, width=100)
     elif args.cmd == "health":
-        _print(cc.site_health(), args.json, HEALTH_COLUMNS)
+        _emit(out, args, cc.site_health(), HEALTH_COLUMNS, width=80)
     elif args.cmd == "device-health":
         filters = {"deviceRole": args.role, "health": args.health}
-        _print(cc.device_health(args.limit or None, **{k: v for k, v in filters.items() if v}), args.json,
-               ["name", "ipAddress", "deviceType", "deviceFamily", "overallHealth", "reachabilityHealth", "location"])
+        rows = cc.device_health(args.limit or None, **{k: v for k, v in filters.items() if v})
+        if args.summary:
+            out.add(f"{len(rows)} devices")
+            _emit(out, args, device_health_summary(rows), ["health", "deviceType", "count"], width=80)
+        else:
+            _emit(out, args, rows, DEVICE_HEALTH_COLUMNS, width=100)
     elif args.cmd == "issues":
         found = cc.issues(priority=args.priority, issueStatus=args.status)
         found.sort(key=lambda i: (i.get("priority") or "P9", -(i.get("last_occurence_time") or 0)))
         if args.summary:
             rows = issue_summary(found)
-            print(f"{len(found)} issues")
-            _print(rows[:args.limit] if args.limit else rows, args.json, ["priority", "count", "issue"], width=100)
+            out.add(f"{len(found)} issues")
+            _emit(out, args, rows[:args.limit] if args.limit else rows, ["priority", "count", "issue"], width=110)
         else:
-            _print(found[:args.limit] if args.limit else found, args.json, ISSUE_COLUMNS, width=90)
+            _emit(out, args, found[:args.limit] if args.limit else found, ISSUE_COLUMNS, width=100)
     elif args.cmd == "get":
         params = dict(kv.split("=", 1) for kv in args.param)
-        _print(cc.get_all(args.path, **params) if args.all else cc.get(args.path, **params))
+        _emit(out, args, cc.get_all(args.path, **params) if args.all else cc.get(args.path, **params))
+    out.save(args.output, args.append)
     return 0
 
 

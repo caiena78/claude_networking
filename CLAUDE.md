@@ -12,6 +12,7 @@ Network operations toolkit for LCMC Health. It answers questions about routers, 
 ```
 python netbox_helper.py sites --name Lake
 python netbox_helper.py devices --site Lakeside [--tag wan_router] [--role wan] [--name wlc]
+python netbox_helper.py devices --site Lakeside --summary [role,model]   # counts instead of rows
 python netbox_helper.py device lakeview-wlc-ha01        # full record: site, role, model, serial, platform, primary IP, tags
 python netbox_helper.py vc wp-6flr                      # virtual chassis (stack): master, members, positions, serials
 python netbox_helper.py ip 10.158.8.21                  # which device and interface has an IP
@@ -39,6 +40,9 @@ Each task's guide is a project skill under `.claude/skills/`. Load it before doi
 | `ise` | `ise_helper.py` | Authentication: where and how a MAC/IP/user authenticated, failures, NADs, policy sets |
 | `cdo-firewall-policy` | `cdo_helper.py` | FTD config and policy: does a prefilter/access rule allow this, NAT, interfaces, routes, objects |
 | `ftd-packet-captures` | `ftd_capture_helper.py` | Live "is this traffic allowed?" captures on the FTDs (the only write action) |
+| `bgp-community` | `bgp_community.py` | BGP communities and AS per WAN router; the site/router map in `bgp_community.txt` |
+
+Every helper takes `--json` and `-o FILE [--append]`. The bulk list commands take `--summary` (counts instead of rows) and `--limit N`. Start with `--summary` when a list could be large.
 
 ## Files
 

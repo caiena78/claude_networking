@@ -13,6 +13,7 @@ Command line (`python meraki_helper.py <command> --help` lists each command's op
 # Inventory and status
 python meraki_helper.py sites                              # every network: device count, online count, types, tags
 python meraki_helper.py devices --network PUC_Kenner [--type switch]   # devices + status, LAN/public IP, last reported
+python meraki_helper.py devices --summary [model|network,status] [--limit 10]   # counts instead of rows (default productType,status); also aps/offline
 python meraki_helper.py aps [--network PUC_Kenner]         # access points + status and tags
 python meraki_helper.py offline [--network X]              # every device whose status is not online
 python meraki_helper.py device "Kenner MX85"               # one device by name, serial or MAC: model, firmware, IPs, address, mgmt interface
@@ -77,6 +78,7 @@ python meraki_helper.py get organizations/{org}/devices -p "serials[]=A" -p "ser
 - Wherever a device is needed, a device name, serial or MAC works (exact name, else a unique substring).
 - Device status is one of `online`, `alerting`, `offline` or `dormant`.
 - Notes from testing (2026-10-12): the org uses **subscription licensing**, so `licenses/overview` returns 400 and `licenses` reads the subscriptions instead. Networks bound to a template (e.g. `PUC_*`) return 400 for `appliance/trafficShaping`, and `sdwan` shows that as an error section. `changes` returns one page of up to 5000 changes, newest first. `events` asks each product type in the network separately and merges the results. `clients` shows usage in MB, converted from the API's KB. `top` shows usage in MB, as the API reports it.
+- **License classes (`licenses --devices`):** the API has no device-to-seat endpoint, so `APPLIANCE_LICENSE_CLASS` in `meraki_helper.py` maps each model to its class: MX-S = MX64-MX68, MX-M = MX75/80/84/85, MX-L = MX95/100/105/400, MX-XL = MX250/450/600, Z = Z1/Z3/Z4. Source: Meraki's MX subscription licensing guide. Verified 2026-10-13: the device counts per class matched the assigned seats exactly (S 8, M 29, L 10), except XL, where the MX250 HA pair (2 devices) uses 1 seat. When Meraki adds a model, add it to the map and re-check the counts against `licenses`.
 - To follow up on a client, take its MAC to ISE (`ise_helper.py auth <mac>`) or Ordr (`ordr_helper.py device <mac>`). To compare MX subnets with NetBox, run `vlans`, then `netbox_helper.py prefix <ip>`.
 
 In Python, for anything the CLI doesn't cover:

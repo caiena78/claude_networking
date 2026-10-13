@@ -22,6 +22,8 @@ From the command line:
     python ordr_helper.py alarms --severity high --limit 20
     python ordr_helper.py vulns --mac 00:11:22:33:44:55
     python ordr_helper.py summary                     # alarm + vulnerability summaries
+    python ordr_helper.py devices --summary --limit 0 # counts by group, profile, maker, risk, status, OS
+    python ordr_helper.py alarms --summary -o alarms.txt
     python ordr_helper.py reports device-count        # list report names matching text
     python ordr_helper.py report 24-hour/device-count-by-type
     python ordr_helper.py get Rest/Locations
@@ -30,8 +32,8 @@ From the command line:
 from __future__ import annotations
 
 import argparse
+import collections
 import ipaddress
-import json
 import re
 import sys
 import time
@@ -39,6 +41,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
+
+from helper_common import Out, table, to_json
 
 SECRET_KEYS = ("ORDR_URL", "ORDR_USER", "ORDR_PASSWORD", "ORDR_TENANTGUID")
 SPEC_URL = "https://api.ordr.net/api-docs/OrdrRestAPI.json"
@@ -231,23 +235,56 @@ def report_names(match: str | None = None) -> list[str]:
 # CLI
 # ---------------------------------------------------------------------------
 
-def _print(data: Any, as_json: bool, columns: list[str] | None = None) -> None:
-    if as_json or not isinstance(data, list) or not data or not columns or not isinstance(data[0], dict):
-        print(json.dumps(data, indent=2, default=str))
+DEVICE_SUMMARY_FIELDS = ["Group", "Profile", "MfgName", "RiskState", "connStatus", "OsType"]
+ALARM_SUMMARY_FIELDS = ["severityLevel", "category", "alarm_type"]
+VULN_SUMMARY_FIELDS = ["severityLevel", "category", "vulnId"]
+
+
+def summarize(rows: list[dict], fields: list[str], top: int | None = None) -> dict[str, list[dict]]:
+    """Count rows by each field: {field: [{"value": v, "count": n}, ...]}, most common first.
+    Missing or empty values count as "(none)". top keeps only the N most common values per field."""
+    result: dict[str, list[dict]] = {}
+    for field in fields:
+        counts = collections.Counter(
+            "(none)" if r.get(field) in (None, "", []) else str(r.get(field)) for r in rows if isinstance(r, dict))
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+        result[field] = [{"value": v, "count": n} for v, n in (ordered[:top] if top else ordered)]
+    return result
+
+
+def _emit(out: Out, args: argparse.Namespace, data: Any, columns: list[str] | None = None, width: int = 80) -> None:
+    if args.json or not columns or not isinstance(data, list):
+        out.add(to_json(data))
+    else:
+        out.add(table(data, columns, width))
+        if data:
+            print(f"\n{len(data)} row(s)", file=sys.stderr)
+
+
+def _emit_rows(out: Out, args: argparse.Namespace, rows: list[dict], columns: list[str], fields: list[str]) -> None:
+    """A table of rows, or with --summary counts by each summary field."""
+    if not args.summary:
+        _emit(out, args, rows, columns)
         return
-    rows = [[("" if item.get(c) is None else str(item.get(c)))[:60] for c in columns] for item in data]
-    widths = [max(len(x) for x in col) for col in zip(columns, *rows)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*columns))
-    print(fmt.format(*("-" * w for w in widths)))
-    for row in rows:
-        print(fmt.format(*row))
-    print(f"\n{len(data)} row(s)", file=sys.stderr)
+    summary = summarize(rows, fields, top=args.top or None)
+    if args.json:
+        out.add(to_json({"rows": len(rows), "summary": summary}))
+        return
+    out.add(f"{len(rows)} row(s) counted" + (" (raise --limit, or --limit 0 for all)" if args.limit and len(rows) >= args.limit else ""))
+    for field, counts in summary.items():
+        out.section(f"by {field}", table(counts, [f"{field}=value", "count"], 80))
+
+
+def _add_summary_args(p: argparse.ArgumentParser, fields: list[str]) -> None:
+    p.add_argument("--summary", action="store_true", help=f"Count the rows by {', '.join(fields)} instead of listing them")
+    p.add_argument("--top", type=int, default=20, help="With --summary: show the N most common values per field (default 20; 0 = all)")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only Ordr REST API helper.")
     parser.add_argument("--json", action="store_true", help="Print raw JSON")
+    parser.add_argument("-o", "--output", help="Also write the output to this file")
+    parser.add_argument("--append", action="store_true", help="With -o: append instead of overwriting")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("device", help="Look up a device by MAC, IP or device name")
@@ -263,6 +300,7 @@ def main() -> int:
     p.add_argument("--iot", action="store_true", help="Only IoT devices")
     p.add_argument("--include", help="e.g. connectivity-info, clinical-info, asset-info")
     p.add_argument("--limit", type=int, default=100, help="Max devices to return (default 100; 0 = all)")
+    _add_summary_args(p, DEVICE_SUMMARY_FIELDS)
 
     p = sub.add_parser("alarms", help="Security alarms")
     p.add_argument("--mac")
@@ -271,11 +309,13 @@ def main() -> int:
                    help="Severity level")
     p.add_argument("--category")
     p.add_argument("--limit", type=int, default=100, help="Max alarms (default 100; 0 = all)")
+    _add_summary_args(p, ALARM_SUMMARY_FIELDS)
 
     p = sub.add_parser("vulns", help="Vulnerabilities")
     p.add_argument("--mac")
     p.add_argument("--ip")
     p.add_argument("--limit", type=int, default=100, help="Max rows (default 100; 0 = all)")
+    _add_summary_args(p, VULN_SUMMARY_FIELDS)
 
     sub.add_parser("summary", help="Security alarm and vulnerability summaries")
     sub.add_parser("locations", help="Ordr locations")
@@ -292,43 +332,47 @@ def main() -> int:
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE", help="Query parameter; repeat for more")
     p.add_argument("--all", action="store_true", help="Follow MetaData.next pagination")
 
-    # Accept --json after the subcommand too (SUPPRESS keeps a --json given before it).
+    # Accept --json/-o/--append after the subcommand too (SUPPRESS keeps a value given before it).
     for subparser in sub.choices.values():
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
+        subparser.add_argument("-o", "--output", default=argparse.SUPPRESS, help="also write the output to this file")
+        subparser.add_argument("--append", action="store_true", default=argparse.SUPPRESS, help="with -o: append")
     args = parser.parse_args()
+    out = Out()
 
     if args.cmd == "reports":
-        for name in report_names(args.match):
-            print(name)
+        out.add("\n".join(report_names(args.match)))
+        out.save(args.output, args.append)
         return 0
 
     o = Ordr()
     if args.cmd == "device":
-        _print(o.device(args.value, include=args.include), args.json, DEVICE_COLUMNS)
+        _emit(out, args, o.device(args.value, include=args.include), DEVICE_COLUMNS)
     elif args.cmd == "devices":
         filters = {k: getattr(args, k) for k in ("group", "profile", "location", "type", "mfg", "model",
                                                  "subcategory", "riskState", "connStatus", "include")}
         if args.iot:
             filters["iot"] = True
-        _print(o.devices(max_items=args.limit or None, **filters), args.json, DEVICE_COLUMNS)
+        _emit_rows(out, args, o.devices(max_items=args.limit or None, **filters), DEVICE_COLUMNS, DEVICE_SUMMARY_FIELDS)
     elif args.cmd == "alarms":
         filters = {"mac": normalize_mac(args.mac) if args.mac else None, "ip": args.ip,
                    "severity-level": args.severity, "category": args.category}
-        _print(o.alarms(max_items=args.limit or None, **filters), args.json, ALARM_COLUMNS)
+        _emit_rows(out, args, o.alarms(max_items=args.limit or None, **filters), ALARM_COLUMNS, ALARM_SUMMARY_FIELDS)
     elif args.cmd == "vulns":
         filters = {"mac": normalize_mac(args.mac) if args.mac else None, "ip": args.ip}
-        _print(o.vulnerabilities(max_items=args.limit or None, **filters), args.json, VULN_COLUMNS)
+        _emit_rows(out, args, o.vulnerabilities(max_items=args.limit or None, **filters), VULN_COLUMNS, VULN_SUMMARY_FIELDS)
     elif args.cmd == "summary":
-        _print({"alarms": o.alarm_summary(), "vulnerabilities": o.vulnerability_summary()}, True)
+        _emit(out, args, {"alarms": o.alarm_summary(), "vulnerabilities": o.vulnerability_summary()})
     elif args.cmd == "locations":
-        _print(o.locations(), True)
+        _emit(out, args, o.locations())
     elif args.cmd == "profiles":
-        _print(o.profiles(), args.json, ["guid", "name", "type"])
+        _emit(out, args, o.profiles(), ["guid", "name", "type"])
     elif args.cmd == "report":
-        _print(o.report(args.name), True)
+        _emit(out, args, o.report(args.name))
     elif args.cmd == "get":
         params = dict(kv.split("=", 1) for kv in args.param)
-        _print(o.get_all(args.path, **params) if args.all else o.get(args.path, **params), True)
+        _emit(out, args, o.get_all(args.path, **params) if args.all else o.get(args.path, **params))
+    out.save(args.output, args.append)
     return 0
 
 

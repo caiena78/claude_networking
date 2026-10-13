@@ -16,13 +16,16 @@ python catalyst_helper.py count                              # devices in invent
 python catalyst_helper.py devices --family "Switches and Hubs" --limit 50   # family must be the exact name
 python catalyst_helper.py devices --hostname "TLS-.*"        # case-sensitive; .* wildcards work
 python catalyst_helper.py devices --reachability Unreachable
+python catalyst_helper.py devices --summary                  # counts by family and reachabilityStatus
+python catalyst_helper.py devices --summary --by platformId  # or any fields, comma-separated: --by role,family
 python catalyst_helper.py device tls-wan-rtr-01              # by hostname, management IP, serial or id
 python catalyst_helper.py interfaces 10.158.136.51           # interfaces of one device
 python catalyst_helper.py config tls-wan-rtr-01              # running config as collected by Catalyst Center
 python catalyst_helper.py client 00:11:22:33:44:55           # connected AP/switch + interface, IP, SSID, VLAN, health
 python catalyst_helper.py sites [--name Global/UMC]
 python catalyst_helper.py health                             # site health
-python catalyst_helper.py device-health --health POOR
+python catalyst_helper.py device-health --health POOR [--limit 50]
+python catalyst_helper.py device-health --summary            # counts by health band (GOOD 8-10, FAIR 4-7, POOR 1-3, NO DATA) and deviceType
 python catalyst_helper.py issues --summary                   # START HERE: counts by priority and kind (often 1,700+ issues)
 python catalyst_helper.py issues --priority P1 [--limit 20]  # active issues, by priority then most recent
 python catalyst_helper.py get network-device/count           # any Intent API path
@@ -31,7 +34,8 @@ python catalyst_helper.py get network-device -p family=Switches --all
 
 - **Hostname filters are case-sensitive**, and only `.*` wildcards work (no `(?i)` or `[Aa]`). LCMC hostnames are mostly uppercase, and some include the domain (`TLS-WAN-RTR-01.lcmchealth.org`, `TLS-WAN-DIS-01`), so use uppercase in `--hostname` filters, e.g. `"TLS-.*"`. `device <name>` handles this for you: it tries the name as typed, in uppercase and in lowercase, exact then with `.*`, and then falls back to serial number. Commands that need exactly one device (`interfaces`, `config`) fail and list the matches if the name is ambiguous.
 - `devices` filters: `--hostname`, `--family` (e.g. `Switches and Hubs`, `Routers`, `Wireless Controller`, `Unified AP`), `--role`, `--platform`, `--version`, `--reachability`, `--location`. For other filters, use `get network-device -p <param>=<value>`.
-- Add `--json` for full records. `config` and `get` always print raw output.
+- Add `--json` for full records. `config` and `get` always print raw output; `device` prints JSON when exactly one device matches.
+- Every command takes `-o FILE` to also write its output to a file (`--append` adds to it). `--json`, `-o` and `--append` work before or after the subcommand. The `N row(s)` count goes to stderr, not the file.
 - `client <mac>` uses the assurance data API (`dna/data/api/v1/clients`) and takes a MAC in any format. It prints `null` when Catalyst Center has no assurance data for the client. That's common for wired PCs. In that case, try Meraki, or Ordr's `device <mac> --include connectivity-info`. Assurance sees about 18,000 clients, mostly wireless.
 - `config` returns a full running config, which includes credential hashes and keys. Read it to answer questions, but only quote the relevant lines, and never repeat secrets, keys or hashes from it.
 - Catalyst Center is `ej-dnac-01.lcmchealth.org`, with about 4,775 devices and 80 sites (tested 2026-10-09) (certificate also valid for `dnac.lcmchealth.org`). **TLS:** its certificate is issued by `EPIC-ICA02` under LCMC's root `EPIC-CA`, the same root as ISE. See "LCMC internal CA" under Setup.

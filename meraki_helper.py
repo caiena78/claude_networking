@@ -414,7 +414,20 @@ def cmd_devices(m: Meraki, args, out: Out) -> None:
     for d in rows:
         d["network"] = names.get(d.get("networkId"), d.get("networkId"))
     rows.sort(key=lambda d: (d["network"] or "", d.get("name") or ""))
-    _emit(out, args, rows, DEVICE_COLUMNS + (["tags"] if args.cmd == "aps" else []))
+    if getattr(args, "summary", None):
+        rows = count_by(rows, args.summary.split(","))
+        _emit(out, args, rows[:args.limit] if args.limit else rows, args.summary.split(",") + ["count"])
+        return
+    _emit(out, args, rows[:args.limit] if args.limit else rows, DEVICE_COLUMNS + (["tags"] if args.cmd == "aps" else []))
+
+
+def count_by(rows: list[dict], fields: list[str]) -> list[dict]:
+    """Count rows by the values of fields, most common first."""
+    counts: dict[tuple, int] = {}
+    for r in rows:
+        key = tuple(str(r.get(f) if r.get(f) is not None else "") for f in fields)
+        counts[key] = counts.get(key, 0) + 1
+    return [{**dict(zip(fields, k)), "count": c} for k, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
 def cmd_device(m: Meraki, args, out: Out) -> None:
@@ -1190,8 +1203,13 @@ def main() -> int:
     add("sites", None, "Every network with device counts and online count")
     p = add("devices", cmd_devices, "Devices with status (optionally for one network)", "optional")
     p.add_argument("--type", dest="product_type", help="appliance, switch, wireless, camera, cellularGateway...")
-    add("aps", cmd_devices, "Access points with status and tags (optionally for one network)", "optional")
-    add("offline", cmd_devices, "Devices whose status is not online", "optional")
+    devs = [p, add("aps", cmd_devices, "Access points with status and tags (optionally for one network)", "optional"),
+            add("offline", cmd_devices, "Devices whose status is not online", "optional")]
+    for p in devs:
+        p.add_argument("--summary", nargs="?", const="productType,status", metavar="FIELDS",
+                       help="Count devices instead of listing them, by comma-separated fields "
+                            "(default productType,status; e.g. model, network, network,status)")
+        p.add_argument("--limit", type=int, default=0, help="Show only the first N rows")
     p = add("device", cmd_device, "One device in full: model, firmware, status, IPs, tags, address, mgmt interface")
     p.add_argument("device", help="Device name, serial or MAC")
     p = add("inventory", cmd_inventory, "Every claimed device, including spares not in a network")

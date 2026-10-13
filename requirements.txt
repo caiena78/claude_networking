@@ -3,5 +3,5 @@ pynetbox>=7.4
 hvac>=2.3
 requests>=2.32
 python-dotenv>=1.0
-rich>=13.7
 truststore>=0.10
+pytest>=8.0
