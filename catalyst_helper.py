@@ -22,6 +22,7 @@ From the command line:
     python catalyst_helper.py sites
     python catalyst_helper.py health
     python catalyst_helper.py issues --priority P1
+    python catalyst_helper.py issues --summary            # counts by priority and kind
     python catalyst_helper.py get dna/intent/api/v1/network-device/count
 """
 
@@ -254,15 +255,38 @@ class Catalyst:
         return data if isinstance(data, list) else []
 
 
+def issue_type(name: str) -> str:
+    """Issue name with device, AP, interface, app and band names replaced, so issues group by kind."""
+    t = re.sub(r'"[^"]*"', '"X"', name or "")
+    t = re.sub(r"'[^']*'", "'X'", t)
+    t = re.sub(r"\s*\(Interface description:.*\)", "", t)
+    t = re.sub(r"\d+ GHz", "N GHz", t)
+    t = re.sub(r"radio \d+", "radio N", t)
+    t = re.sub(r" on [\w.\-]+\.$", " on <AP>.", t)
+    t = re.sub(r"^\S+ Health Degradation$", "<app> Health Degradation", t)
+    t = re.sub(r"(interface) [A-Za-z]+[\d/]+", r"\1 X", t)
+    return t.strip()
+
+
+def issue_summary(issues: list[dict]) -> list[dict]:
+    """Count issues by priority and kind, most common first within each priority."""
+    counts: dict[tuple[str, str], int] = {}
+    for i in issues:
+        key = (i.get("priority") or "", issue_type(i.get("name") or ""))
+        counts[key] = counts.get(key, 0) + 1
+    return [{"priority": p, "count": c, "issue": t}
+            for (p, t), c in sorted(counts.items(), key=lambda kv: (kv[0][0], -kv[1], kv[0][1]))]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def _print(data: Any, as_json: bool = True, columns: list[str] | None = None) -> None:
+def _print(data: Any, as_json: bool = True, columns: list[str] | None = None, width: int = 50) -> None:
     if as_json or not isinstance(data, list) or not data or not columns or not isinstance(data[0], dict):
         print(data if isinstance(data, str) else json.dumps(data, indent=2, default=str))
         return
-    rows = [[("" if item.get(c) is None else str(item.get(c)))[:50] for c in columns] for item in data]
+    rows = [[("" if item.get(c) is None else str(item.get(c)))[:width] for c in columns] for item in data]
     widths = [max(len(x) for x in col) for col in zip(columns, *rows)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*columns))
@@ -300,6 +324,8 @@ def main() -> int:
     p = sub.add_parser("issues", help="Assurance issues")
     p.add_argument("--priority", choices=["P1", "P2", "P3", "P4"])
     p.add_argument("--status", default="ACTIVE", choices=["ACTIVE", "IGNORED", "RESOLVED"])
+    p.add_argument("--summary", action="store_true", help="Count issues by priority and kind instead of listing them")
+    p.add_argument("--limit", type=int, default=0, help="Show only the first N (by priority, then most recent)")
     p = sub.add_parser("get", help="GET any API path, e.g. dna/intent/api/v1/network-device/count")
     p.add_argument("path")
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE", help="Query parameter; repeat for more")
@@ -344,7 +370,14 @@ def main() -> int:
         _print(cc.device_health(args.limit or None, **{k: v for k, v in filters.items() if v}), args.json,
                ["name", "ipAddress", "deviceType", "deviceFamily", "overallHealth", "reachabilityHealth", "location"])
     elif args.cmd == "issues":
-        _print(cc.issues(priority=args.priority, issueStatus=args.status), args.json, ISSUE_COLUMNS)
+        found = cc.issues(priority=args.priority, issueStatus=args.status)
+        found.sort(key=lambda i: (i.get("priority") or "P9", -(i.get("last_occurence_time") or 0)))
+        if args.summary:
+            rows = issue_summary(found)
+            print(f"{len(found)} issues")
+            _print(rows[:args.limit] if args.limit else rows, args.json, ["priority", "count", "issue"], width=100)
+        else:
+            _print(found[:args.limit] if args.limit else found, args.json, ISSUE_COLUMNS, width=90)
     elif args.cmd == "get":
         params = dict(kv.split("=", 1) for kv in args.param)
         _print(cc.get_all(args.path, **params) if args.all else cc.get(args.path, **params))

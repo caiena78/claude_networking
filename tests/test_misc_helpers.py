@@ -53,3 +53,27 @@ def test_report_issue_grouping():
     assert report_helper._issue_kind("No activity on 6 GHz radio 2 on EJ-MOBI-5FL-AP-19.") == \
         report_helper._issue_kind("No activity on 6 GHz radio 2 on TRO-TMOB-TASC-FL1-AP04.")
     assert report_helper._ms(1791820348561).startswith("2026-")
+
+
+def test_catalyst_issue_type_groups_names():
+    import catalyst_helper as cat
+    assert cat.issue_type("No activity on 6 GHz radio 2 on EJ-EJN6-AP2.") == "No activity on N GHz radio N on <AP>."
+    assert cat.issue_type("ldap Health Degradation") == "<app> Health Degradation"
+    assert cat.issue_type("High input/output discard on interface 'GigabitEthernet1/0/6' (Interface description: --)") \
+        == "High input/output discard on interface 'X'"
+    assert cat.issue_type("Low receive power on transceiver interface TwentyFiveGigE1/0/2") \
+        == "Low receive power on transceiver interface X"
+    rows = cat.issue_summary([{"priority": "P2", "name": "a Health Degradation"},
+                              {"priority": "P2", "name": "b Health Degradation"},
+                              {"priority": "P1", "name": 'Device "x" down'}])
+    assert rows == [{"priority": "P1", "count": 1, "issue": 'Device "X" down'},
+                    {"priority": "P2", "count": 2, "issue": "<app> Health Degradation"}]
+
+
+def test_meraki_license_class():
+    import meraki_helper as mh
+    assert mh.license_class("LIC-MX-L-E") == "MX-L"
+    assert mh.license_class("lic-mx-xl-a") == "MX-XL"
+    assert mh.license_class("MX Large") == "MX-L"
+    assert mh.license_class("mx-m") == "MX-M"
+    assert mh.APPLIANCE_LICENSE_CLASS["MX105"] == "MX-L"

@@ -23,7 +23,8 @@ python catalyst_helper.py client 00:11:22:33:44:55           # connected AP/swit
 python catalyst_helper.py sites [--name Global/UMC]
 python catalyst_helper.py health                             # site health
 python catalyst_helper.py device-health --health POOR
-python catalyst_helper.py issues --priority P1               # active assurance issues
+python catalyst_helper.py issues --summary                   # START HERE: counts by priority and kind (often 1,700+ issues)
+python catalyst_helper.py issues --priority P1 [--limit 20]  # active issues, by priority then most recent
 python catalyst_helper.py get network-device/count           # any Intent API path
 python catalyst_helper.py get network-device -p family=Switches --all
 ```
