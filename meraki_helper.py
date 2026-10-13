@@ -1033,7 +1033,58 @@ def cmd_firmware(m: Meraki, args, out: Out) -> None:
     _emit(out, args, rows, cols)
 
 
+# Subscription licensing bills appliances by size class, not by model (SKU LIC-<class>-E/A).
+# The API has no device-to-seat endpoint, so map the model to its class. Checked 2026-10-13:
+# the device counts per class matched the assigned seats per SKU exactly.
+APPLIANCE_LICENSE_CLASS = {
+    "MX64": "MX-S", "MX64W": "MX-S", "MX65": "MX-S", "MX65W": "MX-S", "MX67": "MX-S", "MX67W": "MX-S",
+    "MX67C": "MX-S", "MX68": "MX-S", "MX68W": "MX-S", "MX68CW": "MX-S",
+    "MX75": "MX-M", "MX80": "MX-M", "MX84": "MX-M", "MX85": "MX-M",
+    "MX95": "MX-L", "MX100": "MX-L", "MX105": "MX-L", "MX400": "MX-L",
+    "MX250": "MX-XL", "MX450": "MX-XL", "MX600": "MX-XL",
+    "Z1": "Z", "Z3": "Z", "Z3C": "Z", "Z4": "Z", "Z4C": "Z",
+}
+
+
+def license_class(sku_or_class: str) -> str:
+    """'LIC-MX-L-E', 'mx-l' or 'MX Large' -> 'MX-L'."""
+    text = sku_or_class.strip().upper()
+    words = {"SMALL": "S", "MEDIUM": "M", "LARGE": "L", "X-LARGE": "XL", "XLARGE": "XL", "XL": "XL"}
+    parts = text.split()
+    if len(parts) == 2 and parts[1] in words:
+        return f"{parts[0]}-{words[parts[1]]}"
+    text = text.removeprefix("LIC-")
+    if text.endswith(("-E", "-A")):
+        text = text[:-2]
+    return text
+
+
+def cmd_license_devices(m: Meraki, args, out: Out) -> None:
+    cls = license_class(args.devices)
+    if cls not in set(APPLIANCE_LICENSE_CLASS.values()):
+        raise MerakiError(f"no model mapping for {args.devices!r}; known classes: "
+                          f"{', '.join(sorted(set(APPLIANCE_LICENSE_CLASS.values())))}")
+    names = m.network_names()
+    rows = [d for d in m.device_statuses(**{"productTypes[]": "appliance"})
+            if APPLIANCE_LICENSE_CLASS.get((d.get("model") or "").upper()) == cls]
+    for d in rows:
+        d["network"] = names.get(d.get("networkId"), d.get("networkId"))
+        d["class"] = cls
+    rows.sort(key=lambda d: (d["network"] or "", d.get("name") or ""))
+    if args.json:
+        out.add(to_json(rows))
+        return
+    out.section(f"Devices in license class {cls} ({len(rows)})", table(rows, ["network", "name", "model", "serial", "status", "lastReportedAt"]))
+    seats = [{"subscription": s.get("name"), "status": s.get("status"), **e} for s in m.subscriptions()
+             for e in s.get("entitlements") or [] if license_class(e.get("sku") or "") == cls]
+    out.section(f"Seats for {cls}", table(seats, ["subscription", "status", "sku", "assigned=seats.assigned",
+                                                   "available=seats.available", "limit=seats.limit"]))
+
+
 def cmd_licenses(m: Meraki, args, out: Out) -> None:
+    if args.devices:
+        cmd_license_devices(m, args, out)
+        return
     if args.coterm:
         # Older co-termination licenses (the org moved to subscription licensing).
         rows = m.get_all(f"organizations/{m.org_id}/licensing/coterm/licenses")
@@ -1149,6 +1200,7 @@ def main() -> int:
     p = add("licenses", cmd_licenses, "Subscription licenses: status, dates, seats used per SKU")
     p.add_argument("--coterm", action="store_true", help="Older co-term licenses instead (valid ones unless --all)")
     p.add_argument("--all", action="store_true", help="With --coterm: include expired and invalidated")
+    p.add_argument("--devices", metavar="SKU", help="Devices that use a license class, e.g. LIC-MX-L-E, MX-L or 'MX Large'")
     p = add("firmware", cmd_firmware, "Firmware versions in use (device counts), or scheduled/past upgrades", "many")
     p.add_argument("--by-network", action="store_true", help="Break counts down by network")
     p.add_argument("--by-model", action="store_true", help="Break counts down by model")

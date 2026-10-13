@@ -18,6 +18,7 @@ python meraki_helper.py offline [--network X]              # every device whose 
 python meraki_helper.py device "Kenner MX85"               # one device by name, serial or MAC: model, firmware, IPs, address, mgmt interface
 python meraki_helper.py inventory --unused [--type wireless]   # claimed hardware not in any network (spares)
 python meraki_helper.py licenses [--coterm [--all]]        # subscriptions, status, end dates, seats per SKU
+python meraki_helper.py licenses --devices LIC-MX-L-E      # which MX/Z devices use a license class (also MX-M, 'MX Small', Z) + its seats
 python meraki_helper.py firmware [--by-network] [--by-model] [--network X]   # firmware versions in use
 python meraki_helper.py firmware --scheduled | --history   # scheduled/in-progress or completed/canceled upgrades
 python meraki_helper.py availability --hours 72 [--summary] [--network X] [--type wireless]   # online/offline flaps
