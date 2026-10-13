@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python netbox_helper.py:*)",
+      "Bash(python cisco_helper.py:*)",
+      "Bash(python catalyst_helper.py:*)",
+      "Bash(python ise_helper.py:*)",
+      "Bash(python ordr_helper.py:*)",
+      "Bash(python meraki_helper.py:*)",
+      "Bash(python cdo_helper.py:*)",
+      "Bash(python endpoint_helper.py:*)",
+      "Bash(python audit_helper.py:*)",
+      "Bash(python report_helper.py:*)",
+      "Bash(python -m pytest:*)",
+      "PowerShell(python netbox_helper.py:*)",
+      "PowerShell(python cisco_helper.py:*)",
+      "PowerShell(python catalyst_helper.py:*)",
+      "PowerShell(python ise_helper.py:*)",
+      "PowerShell(python ordr_helper.py:*)",
+      "PowerShell(python meraki_helper.py:*)",
+      "PowerShell(python cdo_helper.py:*)",
+      "PowerShell(python endpoint_helper.py:*)",
+      "PowerShell(python audit_helper.py:*)",
+      "PowerShell(python report_helper.py:*)",
+      "PowerShell(python -m pytest:*)"
+    ],
+    "deny": [
+      "Read(./.env.old)",
+      "Bash(python vault_list.py --show-values:*)",
+      "PowerShell(python vault_list.py --show-values:*)"
+    ]
+  }
+}
