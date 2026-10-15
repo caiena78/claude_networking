@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 SKIP_KEYS = {"VAULT_MOUNT", "VAULT_PATH", "LCMC_CACERT", "ISE_CACERT", "CAT_CACERT", "VAULT_CACERT"}
-PERSONAL = ("CDO_API", "CDO_UUID", "CISCO_SRV_PWD", "CISCO_SRV_ACCOUNT", "VAULT_TOKEN")
+PERSONAL = ("TE_API", "CDO_API", "CDO_UUID", "CISCO_SRV_PWD", "CISCO_SRV_ACCOUNT", "VAULT_TOKEN")
 PATTERNS = [
     ("private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("Vault token", re.compile(r"\bhvs\.[A-Za-z0-9_-]{20,}")),

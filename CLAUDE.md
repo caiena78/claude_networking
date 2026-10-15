@@ -40,6 +40,7 @@ Each task's guide is a project skill under `.claude/skills/`. Load it before doi
 | `ise` | `ise_helper.py` | Authentication: where and how a MAC/IP/user authenticated, failures, NADs, policy sets |
 | `cdo-firewall-policy` | `cdo_helper.py` | FTD config and policy: does a prefilter/access rule allow this, NAT, interfaces, routes, objects |
 | `ftd-packet-captures` | `ftd_capture_helper.py` | Live "is this traffic allowed?" captures on the FTDs (the only write action) |
+| `thousandeyes` | `thousandeyes_helper.py` | ThousandEyes tests, agents, alerts, account groups (token in env var `TE_API`) |
 | `bgp-community` | `bgp_community.py` | BGP communities and AS per WAN router; the site/router map in `bgp_community.txt` |
 
 Every helper takes `--json` and `-o FILE [--append]`. The bulk list commands take `--summary` (counts instead of rows) and `--limit N`. Start with `--summary` when a list could be large.
@@ -50,7 +51,7 @@ Every helper takes `--json` and `-o FILE [--append]`. The bulk list commands tak
 |---|---|
 | `netbox_helper.py` | **The inventory** (commands above). Also `get_devices()` and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
 | `cisco_helper.py` | Read-only show commands on Cisco devices over SSH, `route`, `locate <ip\|mac>`, `wclient <mac>` |
-| `catalyst_helper.py`, `ise_helper.py`, `ordr_helper.py`, `meraki_helper.py`, `cdo_helper.py` | Read-only clients and CLIs for each system (see their skills) |
+| `catalyst_helper.py`, `ise_helper.py`, `ordr_helper.py`, `meraki_helper.py`, `cdo_helper.py`, `thousandeyes_helper.py` | Read-only clients and CLIs for each system (see their skills) |
 | `ftd_capture_helper.py` | Packet captures on the `FTD_CAPTURE_HOSTS` firewalls, active unit only. **The only helper that changes anything on a device.** Logs every change to `captures/audit.log` |
 | `endpoint_helper.py`, `audit_helper.py`, `report_helper.py` | Combined read-only answers: `whois`, `path`, NetBox drift audits, `daily` brief (`--no-cdo` skips your personal CDO key) |
 | `bgp_community.py` | Reads each router's BGP outbound route-map (`set community`) and writes `bgp_community.txt` (site, router, IP, AS, community) |
@@ -69,7 +70,7 @@ Vault secrets at `VAULT_MOUNT`/`VAULT_PATH`: `ansible_user`, `ansible_password`,
 ## Rules
 
 - Never print, log or write the credentials (`ansible_*`, `netbox_token`, `meraki_api`, `ORDR_*`, `ise_*`, `cat_*`, or the other keys at the Vault path) or a Vault token. Do not run `vault_list.py --show-values` unless the user explicitly asks.
-- `CDO_UUID`, `CDO_API`, `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` are environment variables. Never print them, log them or write them to a file.
+- `TE_API`, `CDO_UUID`, `CDO_API`, `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` are environment variables. Never print them, log them or write them to a file.
 - Never put secrets in `.env`. Do not touch `.env.old`.
 - **Devices:** only read-only `show` commands. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state. Run them only when the user asks for information from the devices, and keep to the devices the question needs. **The one exception** is `ftd_capture_helper.py`, which may create, start, stop and remove packet captures on the `FTD_CAPTURE_HOSTS` firewalls under the rules in the `ftd-packet-captures` skill.
 - **Every other system is read-only and goes through its helper, which only sends `GET`** (Catalyst Center also POSTs for its auth token). Never send `POST`, `PUT` or `DELETE` to Meraki, Catalyst Center, ISE, Ordr or CDO/FMC unless the user explicitly asks for that specific change and confirms it. That includes Catalyst Command Runner, templates, provisioning, reboots and syncs; ISE CoA, reauthenticate or disconnect (`/admin/API/mnt/CoA/...`); and Ordr's alarm, vulnerability, asset, onboarding and user write endpoints.
