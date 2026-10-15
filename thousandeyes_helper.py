@@ -18,6 +18,7 @@ From the command line:
     python thousandeyes_helper.py tests [--aid ID] [--type http-server] [--name text]
     python thousandeyes_helper.py agents [--aid ID] [--type enterprise] [--name text]
     python thousandeyes_helper.py alerts [--aid ID] [--state active]
+    python thousandeyes_helper.py status [--all]             # latest round per enabled test, problems only
     python thousandeyes_helper.py get tests/12345 [-p key=value]
 """
 
@@ -27,6 +28,8 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -36,7 +39,7 @@ from helper_common import Out, table, to_json
 BASE_URL = "https://api.thousandeyes.com/v7/"
 MAX_RETRIES = 5
 
-TEST_COLUMNS = ["testId", "testName", "type", "interval", "enabled", "target=server", "url"]
+TEST_COLUMNS = ["testId", "testName", "type", "interval", "enabled", "server", "url", "createdDate"]
 AGENT_COLUMNS = ["agentId", "agentName", "agentType", "location", "ipAddresses", "enabled", "agentState"]
 ALERT_COLUMNS = ["alertId", "testName", "ruleName", "severity", "state", "startDate", "endDate"]
 GROUP_COLUMNS = ["aid", "accountGroupName", "organizationName"]
@@ -92,6 +95,41 @@ class ThousandEyes:
         return self.get_all("alerts", "alerts", aid=aid, **filters)
 
 
+RESULT_PATH = {"http-server": "http-server"}  # everything else (agent-to-server, agent-to-agent) is "network"
+
+
+def test_status(te: ThousandEyes, test: dict) -> dict:
+    """Latest round of one test: how many agents report a problem (loss or an HTTP error) and the worst one."""
+    kind = RESULT_PATH.get(test["type"], "network")
+    row = {"testId": test["testId"], "testName": test["testName"], "type": test["type"], "agents": 0, "bad": 0, "stale": 0, "worst": "", "latest": "", "created": (test.get("createdDate") or "")[:10]}
+    try:
+        results = te.get(f"test-results/{test['testId']}/{kind}").get("results", [])
+    except ThousandEyesError as exc:
+        return {**row, "worst": f"query failed: {str(exc)[:80]}"}
+    now = datetime.now(timezone.utc)
+    for r in results:
+        row["agents"] += 1
+        row["latest"] = max(row["latest"], r.get("date", ""))
+        age = (now - datetime.fromisoformat(r["date"].replace("Z", "+00:00"))).total_seconds() if r.get("date") else 0
+        if age > max(3 * (test.get("interval") or 300), 900):  # enabled but not reporting: stale beats "healthy"
+            row["bad"] += 1
+            row["stale"] += 1
+            row["worst"] = row["worst"] or f"{(r.get('agent') or {}).get('agentName', '?')}: stale, last result {r['date']}"
+            continue
+        err = r.get("errorType") if kind == "http-server" and r.get("errorType") not in (None, "None") else None
+        code = r.get("responseCode") or 0
+        loss = r.get("loss") or 0
+        if err or code >= 400 or loss > 0:
+            row["bad"] += 1
+            detail = err or (f"HTTP {code}" if code >= 400 else f"loss {loss:g}%")
+            if not row["worst"] or loss == 100 or err:
+                row["worst"] = f"{(r.get('agent') or {}).get('agentName', '?')}: {detail}"
+    row["latest"] = row["latest"][:10]
+    if not results:
+        row["worst"] = "no results"
+    return row
+
+
 def _emit(out: Out, args: argparse.Namespace, data: Any, columns: list[str] | None = None) -> None:
     out.add(to_json(data) if args.json or not columns else table(data, columns))
 
@@ -118,6 +156,10 @@ def main() -> int:
         else:
             p.add_argument("--state", help="e.g. active, cleared")
         p.add_argument("--limit", type=int, default=100, help="Max rows (default 100; 0 = all)")
+    p = sub.add_parser("status", help="Latest results for every enabled test; problems first")
+    p.add_argument("--aid", help="Account group id")
+    p.add_argument("--all", action="store_true", help="Also list healthy tests")
+    p.add_argument("--dead", action="store_true", help="Only tests where every agent's last result is old")
     p = sub.add_parser("get", help="GET any API path, e.g. tests/12345")
     p.add_argument("path")
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE", help="Query parameter; repeat for more")
@@ -146,6 +188,18 @@ def main() -> int:
         _emit(out, args, _match(rows, "agentName", args.name)[:limit], AGENT_COLUMNS)
     elif args.cmd == "alerts":
         _emit(out, args, te.alerts(args.aid, max_items=limit, state=args.state), ALERT_COLUMNS)
+    elif args.cmd == "status":
+        tests = [t for t in te.tests(args.aid) if t.get("enabled")]
+        with ThreadPoolExecutor(8) as pool:
+            rows = list(pool.map(lambda t: test_status(te, t), tests))
+        rows.sort(key=lambda r: (-r["bad"], r["testName"]))
+        out.add(f"{len(rows)} enabled tests, {sum(r['bad'] > 0 for r in rows)} with problems on the latest round")
+        if args.dead:
+            rows = sorted((r for r in rows if r["agents"] and r["stale"] == r["agents"]), key=lambda r: r["latest"])
+            _emit(out, args, rows, ["testId", "testName", "type", "agents", "created", "latest"])
+        else:
+            _emit(out, args, rows if args.all or args.json else [r for r in rows if r["bad"]],
+                  ["testId", "testName", "type", "bad", "agents", "worst"])
     elif args.cmd == "get":
         _emit(out, args, te.get(args.path, **dict(kv.split("=", 1) for kv in args.param)))
     out.save(args.output, args.append)

@@ -43,6 +43,8 @@ Each task's guide is a project skill under `.claude/skills/`. Load it before doi
 | `thousandeyes` | `thousandeyes_helper.py` | ThousandEyes tests, agents, alerts, account groups (token in env var `TE_API`) |
 | `bgp-community` | `bgp_community.py` | BGP communities and AS per WAN router; the site/router map in `bgp_community.txt` |
 
+**"TE" means ThousandEyes** (use the `thousandeyes` skill and `thousandeyes_helper.py`).
+
 Every helper takes `--json` and `-o FILE [--append]`. The bulk list commands take `--summary` (counts instead of rows) and `--limit N`. Start with `--summary` when a list could be large.
 
 ## Files
