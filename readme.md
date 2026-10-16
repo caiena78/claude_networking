@@ -195,7 +195,7 @@ Read-only (GET only). It needs `CDO_URL` in `.env`, and `CDO_UUID` and `CDO_API`
 
 ## ftd_capture_helper.py — FTD packet captures
 
-The only helper that changes anything on a device: it creates and removes `CLAUDE_*` packet captures, on the active unit only, on the firewalls in `FTD_CAPTURE_HOSTS` (`.env`). Credentials come from `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD`.
+The only helper that changes anything on a device: it creates and removes `CLAUDE_*` packet captures, on the active unit only, on any firewall with platform `ftd` in NetBox. Credentials come from `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD`.
 
     python ftd_capture_helper.py status                             # failover state
     python ftd_capture_helper.py interfaces --src 192.0.2.10 --dst 198.51.100.5

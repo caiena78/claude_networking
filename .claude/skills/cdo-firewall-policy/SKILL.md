@@ -64,3 +64,7 @@ The user gives a source, a destination and one or more destination ports. `prefi
   - Present it as a short summary, then a table per matching rule.
 
 Follow the ground rules and the Rules section in CLAUDE.md (helpers only, read-only, never print credentials).
+
+## RA VPN session history
+
+`python cdo_helper.py vpn-sessions [--days 14] [--device ACB] [--user NAME] [--status ACTIVE|TERMINATED] [--summary]` lists AnyConnect logins (user, login time, last active, public IP, assigned IP, device) from the Security Cloud Control API `GET /v1/vpnsessions`, using the same `CDO_API` token. The base URL is `CDO_SCC_URL` (default the US region). The API has no time filter and its tenant-wide paging is unstable, so the helper queries each device on its own and filters by `loginTime` itself. `lastActiveTime` is the nearest thing to a logout time. For live sessions on the firewall itself, use `ftd_capture_helper.py vpn`.

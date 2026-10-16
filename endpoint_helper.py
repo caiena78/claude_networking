@@ -366,7 +366,7 @@ def print_path(res: dict, out: Out) -> None:
         for fw in possible:
             out.add(f"    {fw['device']:26} {fw['ingress'][0]} -> {fw['egress'][0]}  ({fw['ingress'][2]} / {fw['egress'][2]})")
     out.add("\n  Policy verdicts ignore zones/interfaces on rules. To prove it with live traffic, run a capture with "
-            "ftd_capture_helper.py (if the firewall is in FTD_CAPTURE_HOSTS).")
+            "ftd_capture_helper.py (any ftd firewall in NetBox).")
     for e in res["errors"]:
         out.add(f"  ! {e}")
 

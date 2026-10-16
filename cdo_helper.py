@@ -16,6 +16,7 @@ From the command line:
     python cdo_helper.py prefilter-rules [--policy NAME]        # rules of a prefilter policy
     python cdo_helper.py prefilter-check --src 10.1.1.10 --dst 170.133.208.5 --ports 443,tcp/22,udp/1194,8000-8010,icmp
     python cdo_helper.py prefilter-check --input request.csv [--summary]
+    python cdo_helper.py vpn-sessions [--days 14] [--user NAME] [--status ACTIVE|TERMINATED]   # RA VPN session history (SCC API)
     python cdo_helper.py get object/networkgroups -p expanded=true      # any GET path under the domain
 
 prefilter-check answers "does an enabled rule of Vendor-Prefilter-Policy already allow source -> destination
@@ -34,6 +35,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +96,31 @@ class CDO:
                 raise CDOError(f"{r.status_code} on {url.replace(self.api, '')}: {detail}")
             return r.json()
         raise CDOError(f"rate limited too many times on {url.replace(self.api, '')}")
+
+    def vpn_sessions(self, days: int = 14, query: str | None = None, device: str | None = None) -> list[dict]:
+        """RA VPN sessions that logged in within the last `days` days (Security Cloud Control
+        GET /v1/vpnsessions; regional base URL in CDO_SCC_URL, default US). The API's paging over the whole
+        tenant is unstable, so each device is queried on its own (q=deviceUid:...) and sessions are
+        de-duplicated by uid. `device` limits it to devices whose name contains that text."""
+        base = (os.environ.get("CDO_SCC_URL") or "https://api.us.security.cisco.com/firewall").rstrip("/")
+        names = {d["uid"]: d["name"] for d in self.get(f"{base}/v1/inventory/devices", limit=200).get("items", [])}
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        found = {}
+        for uid, name in names.items():
+            if device and device.lower() not in name.lower():
+                continue
+            q = " AND ".join(filter(None, [f"deviceUid:{uid}", query]))
+            offset = 0
+            while True:
+                data = self.get(f"{base}/v1/vpnsessions", limit=200, offset=offset, q=q)
+                page = data.get("items", [])
+                for it in page:
+                    if datetime.fromisoformat(it["loginTime"].replace("Z", "+00:00")) >= cutoff:
+                        found[it["uid"]] = {**it, "device": name}
+                offset += 200
+                if not page or offset >= data.get("count", 0):
+                    break
+        return sorted(found.values(), key=lambda i: i["loginTime"], reverse=True)
 
     def get_all(self, path: str, **params: Any) -> list:
         """GET every page of a collection (limit 1000, offset)."""
@@ -919,6 +946,12 @@ def main() -> int:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--device", help="use the NAT policy assigned to this device")
     g.add_argument("--policy", help="NAT policy name")
+    p = sub.add_parser("vpn-sessions", help="RA VPN session history: user, login time, public IP, device (SCC API)")
+    p.add_argument("--days", type=int, default=14, help="logins within this many days (default 14)")
+    p.add_argument("--user", help="only this username")
+    p.add_argument("--status", choices=["ACTIVE", "TERMINATED"])
+    p.add_argument("--device", help="only devices whose name contains this (e.g. ACB)")
+    p.add_argument("--summary", action="store_true", help="logins and distinct users per device and per day")
     p = sub.add_parser("get", help="GET any path under the FMC domain, e.g. object/networkgroups")
     p.add_argument("path")
     p.add_argument("-p", "--param", action="append", default=[], metavar="KEY=VALUE")
@@ -985,6 +1018,18 @@ def main() -> int:
                        [lit.get("value") for lit in (r.get("destinationNetworks") or {}).get("literals", [])]
             r["ports"] = [o.get("name") for o in (r.get("destinationPorts") or {}).get("objects", [])]
         cols = ["index=metadata.ruleIndex", "name", "action", "enabled", "ruleType", "src", "dst", "ports"]
+    elif args.cmd == "vpn-sessions":
+        q = " AND ".join(f"{k}:{v}" for k, v in (("username", args.user), ("status", args.status)) if v)
+        rows = cdo.vpn_sessions(args.days, q or None, args.device)
+        if args.summary:
+            by = {}
+            for r in rows:
+                by.setdefault(r["device"], []).append(r)
+            rows = [{"device": d, "logins": len(v), "users": len({r["username"].lower() for r in v}),
+                     "first": min(r["loginTime"] for r in v), "last": max(r["loginTime"] for r in v)} for d, v in by.items()]
+            print(to_json(rows) if args.json else table(rows, ["device", "logins", "users", "first", "last"]))
+            return 0
+        cols = ["loginTime", "lastActiveTime", "username", "status", "publicIp", "assignedIpV4", "device", "os", "city=location.city", "bytesRx", "bytesTx", "auditSessionId"]
     elif args.cmd == "get":
         params = dict(kv.split("=", 1) for kv in args.param)
         print(json.dumps(cdo.get(args.path, **params) if args.one_page else cdo.get_all(args.path, **params), indent=2))

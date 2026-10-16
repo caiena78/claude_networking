@@ -3,12 +3,9 @@
 This is the only helper in the repo that changes anything on a device: it creates, starts, stops and
 removes packet captures. It never sends anything else (no config, clear, failover, reload or copy).
 
-Which firewalls: only the units listed in .env as FTD_CAPTURE_HOSTS. Separate the units of one HA pair
-with commas and separate pairs with semicolons. A unit may carry a label as ip=name. A group with a single
-IP is a standalone firewall (it must report failover Off).
-    FTD_CAPTURE_HOSTS=192.0.2.11,192.0.2.12
-    FTD_CAPTURE_HOSTS=192.0.2.11=FW-01,192.0.2.12=FW-02;198.51.100.1,198.51.100.2
-Pick a firewall with --fw <ip or label> when more than one is configured.
+Which firewalls: every NetBox device with platform ftd (no separate allow list). The two units of an HA
+pair are grouped by name (-01/-02). Pick a firewall with --fw <ip or name>.
+vpn: read-only RA VPN summary and live sessions (the FTD keeps only live sessions and counters since boot).
 
 Credentials: CISCO_SRV_ACCOUNT / CISCO_SRV_PWD environment variables (never printed or logged).
 
@@ -57,7 +54,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 HERE = Path(__file__).resolve().parent
-load_dotenv(HERE / ".env")  # FTD_CAPTURE_HOSTS; environment variables win
+load_dotenv(HERE / ".env")
 
 PREFIX = "CLAUDE_"
 MAX_BUFFER = 33554432
@@ -74,27 +71,19 @@ MAX_DESC = 20
 
 # ---------------------------------------------------------------- configured firewalls
 
-def load_groups():
-    """FTD_CAPTURE_HOSTS -> [ {ip: label-or-None, ...}, ... ] (one dict per HA pair or standalone unit)."""
-    raw = os.environ.get("FTD_CAPTURE_HOSTS", "").strip()
-    if not raw:
-        sys.exit("FTD_CAPTURE_HOSTS is not set. Add it to .env, e.g. FTD_CAPTURE_HOSTS=<unit1-ip>,<unit2-ip>")
-    groups = []
-    for chunk in raw.split(";"):
-        group = {}
-        for entry in filter(None, (e.strip() for e in chunk.split(","))):
-            ip, _, label = entry.partition("=")
-            ip = ip.strip()
-            try:
-                ipaddress.ip_address(ip)
-            except ValueError:
-                sys.exit(f"FTD_CAPTURE_HOSTS: {ip!r} is not an IP address")
-            group[ip] = label.strip() or None
-        if group:
-            if len(group) > 2:
-                sys.exit(f"FTD_CAPTURE_HOSTS: a group has {len(group)} units; use ';' between HA pairs")
-            groups.append(group)
-    return groups
+def netbox_groups():
+    """Every NetBox device with platform 'ftd', one group per name once a trailing -01/-02 is stripped."""
+    import netbox_helper
+    import vault_helper
+
+    c = vault_helper.get_secrets(interactive=False)
+    nb = netbox_helper.connect(c["netbox_url"], c["netbox_token"])
+    by_name = {}
+    for d in nb.dcim.devices.filter(platform="ftd"):
+        ip = d.primary_ip4 or d.primary_ip
+        if ip:
+            by_name.setdefault(re.sub(r"-0?\d$", "", d.name.lower()), {})[str(ip.address).split("/")[0]] = d.name
+    return list(by_name.values())
 
 
 GROUPS = None
@@ -104,7 +93,7 @@ ALL_HOSTS = {}
 def init_hosts():
     global GROUPS
     if GROUPS is None:
-        GROUPS = load_groups()
+        GROUPS = netbox_groups()
         for g in GROUPS:
             ALL_HOSTS.update(g)
     return GROUPS
@@ -119,7 +108,7 @@ def describe_group(group):
 
 
 def select_group(fw):
-    """The configured firewall to work on: --fw <ip or label>, or the only one configured."""
+    """The firewall to work on: --fw <ip or label>, or the only one configured."""
     groups = init_hosts()
     if fw:
         hits = [g for g in groups if fw in g or any(lbl and fw.lower() in lbl.lower() for lbl in g.values())]
@@ -129,7 +118,7 @@ def select_group(fw):
                  + "; ".join(describe_group(g) for g in groups))
     if len(groups) == 1:
         return groups[0]
-    sys.exit("Several firewalls are configured in FTD_CAPTURE_HOSTS; pick one with --fw <ip or label>: "
+    sys.exit("Several firewalls found in NetBox; pick one with --fw <ip or label>: "
              + "; ".join(describe_group(g) for g in groups))
 
 
@@ -138,7 +127,7 @@ def group_for_hosts(hosts):
     for g in init_hosts():
         if set(hosts) <= set(g):
             return g
-    sys.exit(f"Units {', '.join(hosts)} are no longer in FTD_CAPTURE_HOSTS")
+    sys.exit(f"Units {', '.join(hosts)} are no longer ftd devices in NetBox")
 
 
 AUDIT_LOG = HERE / "captures" / "audit.log"
@@ -171,7 +160,7 @@ class FTD:
 
         init_hosts()
         if host not in ALL_HOSTS:
-            sys.exit(f"Refusing to connect to {host}: not in FTD_CAPTURE_HOSTS")
+            sys.exit(f"Refusing to connect to {host}: not an ftd device in NetBox")
         user, pwd = GetCreds()
         self.host = host
         # .99-class units are slow to show the prompt; generous timeouts. No session_log (it would record the login).
@@ -242,7 +231,7 @@ def get_active(group):
     """Return an FTD connection to the active unit of a group, or exit if the state is unclear.
 
     HA pair: exactly one unit Active and the other Standby Ready. Standalone (one IP in the group):
-    the unit must report failover Off; if failover is On, its peer is missing from FTD_CAPTURE_HOSTS."""
+    the unit must report failover Off; if failover is On, its peer is missing from NetBox (platform ftd)."""
     units = failover_status(group)
     print("Failover state:")
     print_status(units)
@@ -257,7 +246,7 @@ def get_active(group):
         if dev is None or state != "failover not On":
             close_all()
             sys.exit("STOP: standalone unit is unreachable or reports failover On (add its peer to "
-                     "FTD_CAPTURE_HOSTS as a pair). No capture run.")
+                     "NetBox with platform ftd). No capture run.")
         print(f"Standalone unit: {dev.name} ({dev.host})\n")
         return dev
     active = [h for h, u in units.items() if u[2] == "Active"]
@@ -580,6 +569,17 @@ def cmd_status(args):
         for dev, *_ in units.values():
             if dev:
                 dev.close()
+
+
+def cmd_vpn(args):
+    """Read-only RA VPN view from the active unit. The FTD keeps only live sessions plus counters since boot."""
+    dev = get_active(select_group(args.fw))
+    try:
+        print(dev.run("show version system"))
+        print(dev.run("show vpn-sessiondb summary"))
+        print(dev.run("show vpn-sessiondb anyconnect") if args.sessions else "")
+    finally:
+        dev.close()
 
 
 def cmd_list(args):
@@ -1029,16 +1029,19 @@ def cmd_cleanup(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Packet captures on FTD firewalls in FTD_CAPTURE_HOSTS (active unit only)")
+    ap = argparse.ArgumentParser(description="Packet captures on FTD firewalls listed in NetBox (active unit only)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def fw_arg(p):
-        p.add_argument("--fw", help="firewall to use (IP or label from FTD_CAPTURE_HOSTS); "
+        p.add_argument("--fw", help="firewall to use (IP or NetBox name); "
                                     "needed only when more than one is configured")
 
     p = sub.add_parser("status", help="failover state of the units")
     fw_arg(p)
     p = sub.add_parser("list", help="show captures on the active unit")
+    fw_arg(p)
+    p = sub.add_parser("vpn", help="RA VPN summary (live sessions, cumulative and peak since boot); read-only")
+    p.add_argument("--sessions", action="store_true", help="also list each live AnyConnect session")
     fw_arg(p)
     cl = sub.add_parser("cleanup", help="remove leftover CLAUDE_* captures")
     cl.add_argument("--yes", action="store_true", help="actually remove them")
@@ -1081,7 +1084,7 @@ def main():
     args = ap.parse_args()
     if getattr(args, "port", None) and not re.fullmatch(r"\d+(-\d+)?", args.port):
         sys.exit("--port must be a number or range like 8000-8010")
-    {"status": cmd_status, "list": cmd_list, "cleanup": cmd_cleanup, "interfaces": cmd_interfaces,
+    {"status": cmd_status, "list": cmd_list, "vpn": cmd_vpn, "cleanup": cmd_cleanup, "interfaces": cmd_interfaces,
      "start": cmd_start, "check": cmd_check, "stop": cmd_stop, "sessions": cmd_sessions,
      "capture": cmd_capture}[args.cmd](args)
 

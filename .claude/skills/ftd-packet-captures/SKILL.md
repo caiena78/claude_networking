@@ -7,12 +7,11 @@ description: Packet captures on FTD firewalls through ftd_capture_helper.py - th
 
 `ftd_capture_helper.py` runs packet captures over SSH on the FTD firewalls listed in `.env`. It's the **only write action** allowed in this repo, and it may only create, start, stop and remove packet captures. Everything else stays read-only.
 
-**Which firewalls:** only the units in `FTD_CAPTURE_HOSTS` in `.env`. The helper refuses to connect to anything else.
-- **Format:** units of one HA pair are separated by commas, and firewalls are separated by semicolons. A unit can carry an optional label, as `ip=name`. For example: `FTD_CAPTURE_HOSTS=<unit1-ip>=NAME-01,<unit2-ip>=NAME-02;<other-pair-ip1>,<other-pair-ip2>`.
-- **Choosing a firewall:** with more than one configured, pass `--fw <ip or label>`.
+**Which firewalls:** any NetBox device with platform `ftd`. There is no allow list. The two units of an HA pair are grouped by name (`-01`/`-02`), and the helper refuses hosts NetBox doesn't list as `ftd`.
+- **Choosing a firewall:** pass `--fw <ip or NetBox name>` (always needed, many firewalls).
 - **Standalone firewall:** a group with one IP is a standalone unit. It must report failover Off.
-- **Adding a firewall:** add its IPs to `FTD_CAPTURE_HOSTS`. Never hard-code unit IPs in tracked files, because the repo is public.
-- **Currently configured:** the `UMC-FTD-2130-VENDOR-HA` pair (Firepower 2130, FTD 7.4.4). On 2026-10-12 the Secondary (`-02`) was Active. Never assume this; the helper checks every time.
+- **RA VPN (read-only):** `python ftd_capture_helper.py vpn --fw <name> [--sessions]` shows uptime, the VPN session summary (active, cumulative and peak since boot) and live AnyConnect sessions. The FTD has no per-user history; use FMC events, syslog or ISE for that.
+- **Active unit:** never assume which unit is active; the helper checks every time.
 
 **Credentials:** the environment variables `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` (not Vault, not `.env`). They're per user, because every team member has their own FTD account, and captures run as that person. Never hard-code, print or log them, and never ask the user to paste a password into the chat.
 

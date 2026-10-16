@@ -23,17 +23,6 @@ def test_allowlist(cmd, ok):
     assert bool(f.ALLOWED.match(cmd)) is ok
 
 
-def test_load_groups(monkeypatch):
-    monkeypatch.setenv("FTD_CAPTURE_HOSTS", "192.0.2.11=FW-01, 192.0.2.12 ; 198.51.100.1")
-    assert f.load_groups() == [{"192.0.2.11": "FW-01", "192.0.2.12": None}, {"198.51.100.1": None}]
-    monkeypatch.setenv("FTD_CAPTURE_HOSTS", "192.0.2.1,192.0.2.2,192.0.2.3")
-    with pytest.raises(SystemExit):
-        f.load_groups()                                       # more than 2 units in one group
-    monkeypatch.setenv("FTD_CAPTURE_HOSTS", "not-an-ip")
-    with pytest.raises(SystemExit):
-        f.load_groups()
-
-
 SHOW_CAPTURE = """capture LSU_2_EPIC%intf=Inside1% type raw-data trace interface Inside1 [Capturing - 1628926 bytes]
   match ip 155.58.39.0 255.255.255.0 10.194.0.0 255.255.0.0
 capture CLAUDE_TCP443_10-194-2-10_DROP type asp-drop all buffer 1048576 [Capturing - 0 bytes]
