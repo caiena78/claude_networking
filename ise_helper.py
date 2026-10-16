@@ -40,7 +40,7 @@ from urllib.parse import quote, urlparse
 
 import requests
 
-from helper_common import Out, table, to_json
+from helper_common import Out, mask_secrets, table, to_json
 
 SECRET_KEYS = ("ise_url", "ise_user", "ise_password")
 ERS_PORT = 9060
@@ -326,7 +326,7 @@ class ISE:
 def _emit(out: Out, args: argparse.Namespace, data: Any, columns: list[str] | None = None, width: int = 60) -> None:
     """A table when columns are given and the data is a list (unless --json), else indented JSON."""
     if args.json or not columns or not isinstance(data, list):
-        out.add(to_json(data))
+        out.add(to_json(data, mask_secrets))
     else:
         out.add(table(data, columns, width))
         print(f"\n{len(data)} row(s)", file=sys.stderr)
@@ -385,7 +385,7 @@ def summarize_nads(nads: list[dict], limit: int | None = None) -> dict[str, Any]
 def _emit_summary(out: Out, args: argparse.Namespace, summary: dict[str, Any]) -> None:
     """Totals on one line, then a value/count table per by_* list (or the dict as JSON with --json)."""
     if args.json:
-        out.add(to_json(summary))
+        out.add(to_json(summary, mask_secrets))
         return
     out.add("  ".join(f"{k}={v}" for k, v in summary.items() if not isinstance(v, list)) + "\n")
     for key, rows in summary.items():

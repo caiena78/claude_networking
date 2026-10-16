@@ -56,6 +56,20 @@ def table(rows: list[dict], columns: list[str], width: int = 60, mask: Callable[
     return "\n".join(lines)
 
 
+SECRET_KEY = re.compile(r"secret|password|passwd|passphrase|token|community|psk|encryptionkey|authenticatorcodekey|privatekey", re.I)
+
+
+def mask_secrets(data: Any) -> Any:
+    """Copy of nested dicts/lists with the value of any secret-looking key (shared secret, password, token,
+    SNMP community...) replaced by '********'. Empty values and true/false flags stay as they are."""
+    if isinstance(data, dict):
+        return {k: ("********" if SECRET_KEY.search(str(k)) and isinstance(v, str) and v and v.lower() not in ("true", "false")
+                    else mask_secrets(v)) for k, v in data.items()}
+    if isinstance(data, list):
+        return [mask_secrets(v) for v in data]
+    return data
+
+
 def to_json(data: Any, mask: Callable[[Any], Any] | None = None) -> str:
     return json.dumps(mask(data) if mask else data, indent=2, default=str)
 
