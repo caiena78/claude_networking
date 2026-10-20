@@ -144,7 +144,7 @@ def _memory(root: Any, arg: str | None, device: dict) -> str:
 
 
 def _arp(root: Any, arg: str | None, device: dict) -> str:
-    from cisco_helper import default_vrf  # the cores' ARP is read in their routed VRF, like the SSH path
+    from cisco_route import default_vrf  # the cores' ARP is read in their routed VRF, like the SSH path
 
     vrf = default_vrf(device)
     rows = []

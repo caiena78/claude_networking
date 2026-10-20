@@ -36,7 +36,7 @@ Every helper takes `--json` and `-o FILE [--append]`. The bulk list commands tak
 | File | Role |
 |---|---|
 | `netbox_helper.py` | **The inventory.** Also `get_devices()` and `PLATFORM_MAP` (NetBox platform slug to netmiko device_type) |
-| `cisco_helper.py` (+ `cisco_common.py`, `cisco_parse.py`, `cisco_wlc.py`) | Read-only commands on Cisco devices, NETCONF first when TCP 830 is open, else SSH; `route`, `locate`, WLC/SSID commands. `cisco_common.py` has the read-only guard (`validate_show`) and secret masking |
+| `cisco_helper.py` | Read-only commands on Cisco devices, NETCONF first when TCP 830 is open, else SSH: the command table, `CiscoRunner`, the CLI. Code it uses: `cisco_common.py` (read-only guard `validate_show`, secret masking, MAC parsing, cache), `cisco_route.py` (route commands/parsing, `CORE_VRFS`), `cisco_locate.py` (`locate` IP/MAC to switchport), `cisco_parse.py` (ARP/MAC-table/CDP parsers), `cisco_wlc.py` (9800 and AireOS SSID/client code) |
 | `netconf_helper.py` | Read-only NETCONF (`get`, `get-config`, `get-schema`) for IOS-XE: `probe`, `caps`, `get`, `schema`, `list`, and the NETCONF versions of built-in commands |
 | `catalyst_helper.py`, `ise_helper.py`, `ordr_helper.py`, `meraki_helper.py`, `cdo_helper.py`, `thousandeyes_helper.py` | Read-only clients and CLIs for each system (see their skills) |
 | `ftd_capture_helper.py` | Packet captures on any NetBox platform-`ftd` firewall, active unit only; `vpn` shows RA VPN sessions (read-only). **The only helper that changes anything on a device.** Logs every change to `captures/audit.log` |

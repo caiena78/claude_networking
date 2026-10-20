@@ -41,7 +41,7 @@ python cisco_helper.py ssid-count -d <wlc>                        # WLC SSIDs an
 ## Adding a platform
 
 1. `netbox_helper.py`: add the NetBox platform slug to `PLATFORM_MAP`, mapped to a netmiko device_type. Unknown slugs fall back to `cisco_ios`, with a warning. (AireOS WLCs, platform `airos`, map to `cisco_wlc_ssh`.)
-2. `cisco_helper.py`: if the platform's route command differs, add a branch in `route_command()`. If its "not found" text is new, add it to `ROUTE_NOT_FOUND`. For other commands, add a platform column or override in `COMMANDS`.
+2. `cisco_route.py`: if the platform's route command differs, add a branch in `route_command()`. If its "not found" text is new, add it to `ROUTE_NOT_FOUND`. In `cisco_helper.py`, for other commands, add a platform column or override in `COMMANDS`.
 3. Run `python -m pytest -q` after changing a parser.
 
 Follow the ground rules and the Rules section in CLAUDE.md (helpers only, read-only, never print credentials).

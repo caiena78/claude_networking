@@ -1,6 +1,7 @@
 """Shared pieces of the Cisco helpers: the read-only guard (validate_show), secret masking and MAC parsing."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -87,3 +88,15 @@ def send(conn: Any, command: str, timeout: int) -> str:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(cache, fh)
     return output
+
+def parent_interface(name: str) -> str:
+    """GigabitEthernet0/0/1.110 -> GigabitEthernet0/0/1."""
+    return name.split(".")[0]
+
+
+def is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip())
+        return True
+    except ValueError:
+        return False
