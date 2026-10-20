@@ -38,6 +38,10 @@ python ise_helper.py nad 10.158.136.51                # network device by IP, or
 python ise_helper.py nads --name wan [--limit N]       # list NADs (id, name)
 python ise_helper.py nads --summary --name tls        # counts by device group (Location, Device Type, IPSEC, DNAC), profile, model
 python ise_helper.py groups                           # endpoint identity groups
+python ise_helper.py health                           # one-page check: nodes, certs, licenses, config backup, version/patch, PAN failover, sessions per PSN
+python ise_helper.py certs [--days 90]                # system certs on every node (soonest expiry first) + trusted certs expiring within --days
+python ise_helper.py license                          # smart licensing state, per-tier compliance/consumption, eval days left
+python ise_helper.py auth <mac> --failed              # only failed attempts for a MAC
 python ise_helper.py nodes                            # deployment nodes and roles
 python ise_helper.py policy-sets [--device-admin]
 python ise_helper.py ers sgt                          # any ERS resource; -f name.CONTAINS.x ; --id <uuid>
@@ -45,6 +49,7 @@ python ise_helper.py mnt Session/ActiveCount          # any MnT path
 python ise_helper.py api deployment/node              # any OpenAPI path
 ```
 
+- `health` rows are OK / WARN / FAIL / n/a. **Disk usage and an overall authentication-failure count are not in any ISE API** (probed 2026-10-20: no MnT or OpenAPI path), so `health` lists them as n/a. Failures are only available per MAC (`auth <mac> --failed`); for disk use the ISE dashboard alarms or `show disks` on each node. Certs and licenses come from OpenAPI `certs/*` and `license/system/*`; PAN auto-failover, config backup and patch level from `deployment/pan-ha`, `backup-restore/config/last-backup-status` and `patch`.
 - Every command takes `-o FILE` (also write the output to a file) and `--append`; `--json`, `-o` and `--append` work before or after the subcommand.
 - `active --summary` covers all active sessions. The active list only has user, MAC, framed IP, NAS IP and PSN (`server`), so it counts by PSN and NAS IP; `--limit` caps the rows per count. For auth protocol/method use `active --protocols` (one lookup per session, slower).
 - `nads --summary` fetches each NAD's full record (one ERS call each; there are about 1,200 NADs, so narrow with `--name` or `--limit`). Group values are the tail of the NDG path, e.g. `Location#All Locations#TLS` -> `TLS`.

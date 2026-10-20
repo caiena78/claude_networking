@@ -22,6 +22,10 @@ From the command line:
     python ise_helper.py auth 00:11:22:33:44:55 --hours 24
     python ise_helper.py active --count
     python ise_helper.py nad 10.158.136.51             # network device by name or IP
+    python ise_helper.py auth 00:11:22:33:44:55 --failed      # only failed attempts
+    python ise_helper.py certs [--days 90]            # system certs on every node + trusted certs expiring soon
+    python ise_helper.py license                      # smart licensing state, tier compliance, eval days
+    python ise_helper.py health                       # one-page check: nodes, certs, licenses, backup, patches, PAN HA
     python ise_helper.py ers endpointgroup
     python ise_helper.py api deployment/node
 """
@@ -34,6 +38,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from typing import Any, Callable
 from urllib.parse import quote, urlparse
@@ -228,14 +233,110 @@ class ISE:
             raise
         return next(iter(data.values())) if data else None
 
-    def auth_status(self, mac: str, hours: int = 24, records: int = 10) -> list[dict]:
+    def auth_status(self, mac: str, hours: int = 24, records: int = 10, failed: bool = False) -> list[dict]:
         """Recent authentication records for a MAC (newest first). ISE allows up to 120 hours."""
         seconds = min(max(hours, 1), 120) * 3600
         data = self.mnt(f"AuthStatus/MACAddress/{normalize_mac(mac)}/{seconds}/{records}/All")
         # Shape: {"authStatusOutputList": {"authStatusList": {"key": mac, "authStatusElements": [...]}}}
         status_list = ((next(iter(data.values())) or {}).get("authStatusList") or {}) if data else {}
         rows = status_list.get("authStatusElements", []) if isinstance(status_list, dict) else []
-        return rows if isinstance(rows, list) else [rows]
+        rows = rows if isinstance(rows, list) else [rows]
+        return [r for r in rows if str(r.get("failed")).lower() == "true"] if failed else rows
+
+    @staticmethod
+    def _cert_days(cert: dict) -> int | None:
+        """Days until a cert's expirationDate ('Fri Nov 02 15:22:22 UTC 2040'); negative = expired."""
+        try:
+            end = datetime.strptime(cert["expirationDate"], "%a %b %d %H:%M:%S UTC %Y").replace(tzinfo=timezone.utc)
+        except (KeyError, ValueError):
+            return None
+        return (end - datetime.now(timezone.utc)).days
+
+    def certificates(self, days: int = 90) -> list[dict]:
+        """System certs of every node (all of them) plus trusted certs expiring within `days` (or already expired),
+        soonest first. Each row: scope, node, name, issued_to, issued_by, used_by, expires, days_left."""
+        rows = []
+        for node in self.nodes():
+            for c in self.api(f"certs/system-certificate/{node['hostname']}"):
+                rows.append({"scope": "system", "node": node["hostname"], "name": c.get("friendlyName"),
+                             "issued_to": c.get("issuedTo"), "issued_by": c.get("issuedBy"),
+                             "used_by": c.get("usedBy"), "expires": c.get("expirationDate"),
+                             "days_left": self._cert_days(c)})
+        for c in self.api("certs/trusted-certificate"):
+            left = self._cert_days(c)
+            if left is not None and left <= days:
+                rows.append({"scope": "trusted", "node": "", "name": c.get("friendlyName"),
+                             "issued_to": c.get("issuedTo"), "issued_by": c.get("issuedBy"),
+                             "used_by": c.get("status") or "", "expires": c.get("expirationDate"), "days_left": left})
+        return sorted(rows, key=lambda r: (r["days_left"] is None, r["days_left"] or 0))
+
+    def licenses(self) -> dict:
+        """Smart licensing connection/state, per-tier compliance and consumption, and evaluation days left."""
+        return {"smart": self.api("license/system/smart-state"), "tiers": self.api("license/system/tier-state"),
+                "eval": self.api("license/system/eval-license")}
+
+    def health(self, cert_days: int = 90) -> list[dict]:
+        """One row per check: area, status (OK / WARN / FAIL / n/a), detail. Disk usage and an overall
+        authentication failure count are not exposed by any ISE API, so they are listed as n/a."""
+        rows: list[dict] = []
+
+        def add(area: str, status: str, detail: str) -> None:
+            rows.append({"area": area, "status": status, "detail": detail})
+
+        def nodes() -> None:
+            ns = self.nodes()
+            bad = [n["hostname"] for n in ns if n.get("nodeStatus") != "Connected"]
+            add("nodes", "FAIL" if bad else "OK",
+                f"{len(ns) - len(bad)}/{len(ns)} connected" + (f"; down: {', '.join(bad)}" if bad else ""))
+
+        def certs() -> None:
+            soon = [c for c in self.certificates(cert_days) if c["days_left"] is not None and c["days_left"] <= cert_days]
+            if not soon:
+                add("certificates", "OK", f"nothing expires within {cert_days} days")
+                return
+            expired = [c for c in soon if c["days_left"] < 0]
+            first = soon[0]
+            add("certificates", "FAIL" if expired else "WARN",
+                f"{len(soon)} expire within {cert_days} days ({len(expired)} already expired); soonest: "
+                f"{first['name']} ({first['node'] or first['scope']}) in {first['days_left']} days")
+
+        def lic() -> None:
+            info = self.licenses()
+            bad = [t["name"] for t in info["tiers"] if t.get("compliance") not in ("COMPLIANT", "EVALUATION")]
+            add("licenses", "FAIL" if bad else "OK",
+                f"smart licensing {info['smart'].get('state')} ({info['smart'].get('connectionType')}); "
+                + ", ".join(f"{t['name']} {t.get('compliance')} ({t.get('consumptionCounter', 0)})" for t in info["tiers"])
+                + (f"; out of compliance: {', '.join(bad)}" if bad else ""))
+
+        def backup() -> None:
+            b = self.api("backup-restore/config/last-backup-status")
+            add("config backup", "OK" if b.get("status") == "COMPLETED" else "FAIL",
+                f"{b.get('name')} {b.get('status')} {b.get('startDate')}" + (f" error: {b['error']}" if b.get("error") else ""))
+
+        def patch() -> None:
+            pv = self.api("patch")
+            top = max((x["patchNumber"] for x in pv.get("patchVersion") or []), default="none")
+            add("version", "OK", f"{pv.get('iseVersion')} patch {top}")
+
+        def pan_ha() -> None:
+            on = self.api("deployment/pan-ha").get("isEnabled")
+            add("PAN auto-failover", "OK" if on else "WARN", "enabled" if on else "disabled")
+
+        def sessions() -> None:
+            by: dict[str, int] = {}
+            for sess in self.active_sessions():
+                by[sess.get("server")] = by.get(sess.get("server"), 0) + 1
+            add("sessions", "OK", f"{sum(by.values())} active; " + ", ".join(f"{k} {v}" for k, v in sorted(by.items())))
+
+        for area, fn in (("nodes", nodes), ("certificates", certs), ("licenses", lic), ("config backup", backup),
+                         ("version", patch), ("PAN auto-failover", pan_ha), ("sessions", sessions)):
+            try:
+                fn()
+            except ISEError as exc:
+                add(area, "n/a", f"could not read: {str(exc)[:120]}")
+        add("disk", "n/a", "not exposed by any ISE API; see the dashboard alarms or 'show disks' on each node")
+        add("auth failures", "n/a", "no overall count in the API; use 'auth <mac> --failed' per endpoint or ISE reports")
+        return rows
 
     def lookup(self, mac: str) -> dict:
         """Everything ISE knows about a MAC: ERS endpoint record plus the live session."""
@@ -414,6 +515,12 @@ def main() -> int:
     p.add_argument("mac")
     p.add_argument("--hours", type=int, default=24, help="Look back this many hours (max 120, default 24)")
     p.add_argument("--records", type=int, default=10, help="Max records (default 10)")
+    p.add_argument("--failed", action="store_true", help="Only failed attempts")
+    p = sub.add_parser("certs", help="System certs on every node, plus trusted certs expiring soon (soonest first)")
+    p.add_argument("--days", type=int, default=90, help="Trusted certs expiring within this many days (default 90)")
+    sub.add_parser("license", help="Smart licensing state, per-tier compliance and consumption, eval days left")
+    p = sub.add_parser("health", help="One-page check: nodes, certs, licenses, backup, version, PAN HA, sessions")
+    p.add_argument("--cert-days", type=int, default=90, help="Warn when a cert expires within this many days (default 90)")
     p = sub.add_parser("active", help="Active sessions")
     p.add_argument("--count", action="store_true", help="Only print the number of active sessions")
     p.add_argument("--protocols", action="store_true",
@@ -458,8 +565,22 @@ def main() -> int:
     elif args.cmd == "session":
         _emit(out, args, _session_view(ise.session(args.value), args.json))
     elif args.cmd == "auth":
-        rows = ise.auth_status(args.mac, args.hours, args.records)
+        rows = ise.auth_status(args.mac, args.hours, args.records, args.failed)
         _emit(out, args, rows if args.json else [_session_view(r, False) for r in rows])
+    elif args.cmd == "certs":
+        _emit(out, args, ise.certificates(args.days),
+              ["scope", "node", "name", "issued_to", "used_by", "expires", "days_left"], width=40)
+    elif args.cmd == "license":
+        lic = ise.licenses()
+        if args.json:
+            _emit(out, args, lic)
+        else:
+            out.add(f"smart licensing: {lic['smart'].get('state')} ({lic['smart'].get('connectionType')}); "
+                    f"evaluation days left: {lic['eval'].get('daysRemaining')}\n")
+            out.add(table(lic["tiers"], ["name", "status", "compliance", "consumptionCounter",
+                                         "daysOutOfCompliance", "lastAuthorization"], 40))
+    elif args.cmd == "health":
+        _emit(out, args, ise.health(args.cert_days), ["area", "status", "detail"], width=140)
     elif args.cmd == "active":
         if args.count:
             out.add(str(ise.active_count()))

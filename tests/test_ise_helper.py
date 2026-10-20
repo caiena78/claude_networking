@@ -107,3 +107,10 @@ def test_emit_and_summary_output(capsys, tmp_path):
     jout = hc.Out()
     ih._emit_summary(jout, argparse.Namespace(json=True), {"nads": 0, "by_model": []})
     assert '"nads": 0' in jout.text()
+
+
+def test_cert_days():
+    from ise_helper import ISE
+    assert ISE._cert_days({"expirationDate": "Fri Nov 02 15:22:22 UTC 2001"}) < 0
+    assert ISE._cert_days({"expirationDate": "Fri Nov 02 15:22:22 UTC 2999"}) > 10000
+    assert ISE._cert_days({"expirationDate": "garbage"}) is None
