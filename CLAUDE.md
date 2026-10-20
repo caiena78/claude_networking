@@ -57,7 +57,7 @@ Vault secrets at `VAULT_MOUNT`/`VAULT_PATH`: `ansible_user`, `ansible_password`,
 ## Rules
 
 - Never print, log or write the credentials (`ansible_*`, `netbox_token`, `meraki_api`, `ORDR_*`, `ise_*`, `cat_*`, or the other keys at the Vault path) or a Vault token. Do not run `vault_list.py --show-values` unless the user explicitly asks.
-- `TE_API`, `CDO_UUID`, `CDO_API`, `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` are environment variables. Never print them, log them or write them to a file.
+- `TE_API`, `CDO_UUID` and `CDO_API` are environment variables. Never print them, log them or write them to a file.
 - Never put secrets in `.env`. Do not touch `.env.old`.
 - **Devices:** only read-only `show` commands over SSH, and NETCONF `get`, `get-config` and `get-schema` (never `edit-config`, `commit`, `lock` or other RPCs). `cisco_helper.py` checks TCP 830 before it runs a command and uses NETCONF when the command has a NETCONF version (`--transport auto|netconf|ssh`), else SSH. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state. Run them only when the user asks for information from the devices, and keep to the devices the question needs. **The one exception** is `ftd_capture_helper.py`, which may create, start, stop and remove packet captures on any firewall with platform `ftd` in NetBox (no separate allow list) under the rules in the `ftd-packet-captures` skill.
 - **Scans:** `nmap_helper.py` is the only way to run nmap, and only for ping sweeps and port scans of internal addresses the user names. Don't scan on your own initiative, don't scan ranges bigger than the question needs, and don't work around its limits (see the `nmap` skill).

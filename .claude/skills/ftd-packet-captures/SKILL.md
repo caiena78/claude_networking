@@ -13,7 +13,7 @@ description: Packet captures on FTD firewalls through ftd_capture_helper.py - th
 - **RA VPN (read-only):** `python ftd_capture_helper.py vpn --fw <name> [--sessions]` shows uptime, the VPN session summary (active, cumulative and peak since boot) and live AnyConnect sessions. The FTD has no per-user history; use FMC events, syslog or ISE for that.
 - **Active unit:** never assume which unit is active; the helper checks every time.
 
-**Credentials:** the environment variables `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` (not Vault, not `.env`). They're per user, because every team member has their own FTD account, and captures run as that person. Never hard-code, print or log them, and never ask the user to paste a password into the chat.
+**Credentials:** the Vault secrets `ansible_user` and `ansible_password`, the same shared account the other Cisco helpers use (not `.env`, not environment variables). Captures therefore run as that shared account, and `captures/audit.log` records the local user who ran them (never the account name). Never hard-code, print or log the credentials, and never ask the user to paste a password into the chat.
 
 **Connecting:** netmiko with `device_type="cisco_ftd"` and generous timeouts, because some units are slow to show the prompt. The netmiko session log is off, since it would record the login. The helper stays at the `>` CLISH prompt and never enters `expert` mode or `configure`.
 

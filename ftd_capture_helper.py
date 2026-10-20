@@ -7,7 +7,8 @@ Which firewalls: every NetBox device with platform ftd (no separate allow list).
 pair are grouped by name (-01/-02). Pick a firewall with --fw <ip or name>.
 vpn: read-only RA VPN summary and live sessions (the FTD keeps only live sessions and counters since boot).
 
-Credentials: CISCO_SRV_ACCOUNT / CISCO_SRV_PWD environment variables (never printed or logged).
+Credentials: the Vault secrets ansible_user / ansible_password (never printed or logged), the same account the
+other Cisco helpers use.
 
 Usage:
     python ftd_capture_helper.py status                      # failover state of the units
@@ -135,23 +136,28 @@ AUDIT_LOG = HERE / "captures" / "audit.log"
 
 def audit(host, unit, cmd):
     """Append every command that changes a device (capture / no capture / start / stop) to captures/audit.log
-    (git-ignored, local to each person): UTC time, local user, FTD account, unit and the exact command.
+    (git-ignored, local to each person): UTC time, local user, unit and the exact command. Captures all run as
+    the shared Vault account, so the local user is what says who ran it (the account name is never logged).
     Written before the command is sent, so an attempt that fails is still recorded."""
     AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
     who = os.environ.get("USERNAME") or os.environ.get("USER") or "?"
-    account = os.environ.get("CISCO_SRV_ACCOUNT") or "?"
     stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
-        fh.write(f"{stamp}\tuser={who}\taccount={account}\tunit={unit} ({host})\t{cmd}\n")
+        fh.write(f"{stamp}\tuser={who}\taccount=vault\tunit={unit} ({host})\t{cmd}\n")
 
 
 def GetCreds():
-    user = os.environ.get("CISCO_SRV_ACCOUNT")
-    pwd = os.environ.get("CISCO_SRV_PWD")
-    if not user or not pwd:
-        print("CISCO_SRV_ACCOUNT / CISCO_SRV_PWD NOT SET")
-        sys.exit(1)
-    return user, pwd
+    """The FTD login: the Vault secrets ansible_user / ansible_password (the account the Cisco helpers use)."""
+    import vault_helper
+
+    try:
+        secrets = vault_helper.get_secrets(interactive=False)
+    except Exception as exc:  # noqa: BLE001 - no Vault login, or a missing secret
+        sys.exit(f"Could not read ansible_user / ansible_password from Vault: {type(exc).__name__}. "
+                 "Sign in with vault_login.ps1 and try again.")
+    if not secrets.get("ansible_user") or not secrets.get("ansible_password"):
+        sys.exit("ansible_user / ansible_password are not set in Vault")
+    return secrets["ansible_user"], secrets["ansible_password"]
 
 
 class FTD:
