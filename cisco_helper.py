@@ -621,6 +621,8 @@ class CiscoRunner:
             _, ssid, status = wlans.get(wid, ("", f"(unknown WLAN {wid})", ""))
             row = by_ssid.setdefault(ssid, {"ssid": ssid, "wlan_ids": [], "status": status, "clients": 0})
             row["wlan_ids"].append(wid)
+            if status == "UP":  # an SSID on several WLAN IDs is UP when any of them is
+                row["status"] = "UP"
             row["clients"] += counts.get(wid, 0)
         return sorted(by_ssid.values(), key=lambda r: -r["clients"])
 
@@ -685,7 +687,8 @@ class CiscoRunner:
             if command_name == "ssid":
                 if not arg:
                     raise CiscoError("'ssid' needs an SSID name")
-                command = f"ssid {arg} (show wlan summary, running-config sections, show wlan name)"
+                command = (f"ssid {arg} (show wlan summary, show wlan <id>)" if is_aireos(device) else
+                           f"ssid {arg} (show wlan summary, running-config sections, show wlan name)")
             elif command_name == "ssid-auth":
                 if not arg:
                     raise CiscoError("'ssid-auth' needs an SSID name")

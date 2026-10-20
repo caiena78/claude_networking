@@ -206,3 +206,34 @@ def test_ssid_count_parsers():
     rows = c.wlan_rows(WLAN_SUMMARY)
     assert rows["13"] == ("LCMC-VOIP_profile", "LCMC-VOIP", "UP") and rows["2416"][1] == "EJGH-VOICE"
     assert c.client_counts_by_wlan(CLIENT_SUMMARY) == {"13": 1, "2416": 1, "11": 1}
+
+
+AIREOS_WLANS = """Number of WLANs.................................. 3
+
+WLAN ID  WLAN Profile Name / SSID                                                 Status    Interface Name        PMIPv6 Mobility
+-------  -----------------------------------------------------------------------  --------  --------------------  ---------------
+1        LCMC-Guest / LCMC-Guest                                                  Enabled   black hole            none
+4        LCMC-VoIP / LCMC-VoIP                                                    Enabled   umc-voip              none
+8        LSUHSC-Secure / LSUHSC-Secure                                            Disabled  management            none
+"""
+AIREOS_CLIENTS = """MAC Address       AP Name                        Slot Status        WLAN  Auth Protocol         Port Wired Tunnel  Role
+----------------- ------------------------------ ---- ------------- ----- ---- ---------------- ---- ----- ------- ----------------
+06:31:eb:ad:62:54 AP345D.A8D4.74A4                1   Associated     1    Yes   802.11ax(5 GHz)  8    No    No      Export foreign
+08:b6:1f:9b:56:b4 10.21.64.16                     N/A Associated     4    Yes  Mobile           8    No    No      Anchor
+56:59:9b:4f:b6:52 AP345D.A8D4.74A4                1   Associated     4    No   802.11ac(5 GHz)  8    No    No      Local
+"""
+
+
+def test_airos_wlan_and_client_parsers():
+    assert c.wlan_rows(AIREOS_WLANS)["8"] == ("LSUHSC-Secure", "LSUHSC-Secure", "DOWN")
+    assert c.wlan_ids_for_ssid(AIREOS_WLANS, "lcmc-voip") == ["4"]
+    assert c.client_counts_by_wlan(AIREOS_CLIENTS) == {"1": 1, "4": 2}
+    assert c.clients_on_wlans(AIREOS_CLIENTS, ["4"]) == ["08b6.1f9b.56b4", "5659.9b4f.b652"]
+    assert c.parse_eap_type("EAP Type......................................... PEAP\n") == "PEAP"
+
+
+def test_airos_build_command():
+    assert c.build_command("version", "cisco_wlc_ssh") == "show sysinfo"
+    assert c.build_command("interface", "cisco_wlc_ssh", "management") == "show interface detailed management"
+    with pytest.raises(c.CiscoError):
+        c.build_command("bgp", "cisco_wlc_ssh")
