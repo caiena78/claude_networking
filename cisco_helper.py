@@ -37,6 +37,7 @@ import ipaddress
 import json
 import re
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -87,6 +88,8 @@ COMMANDS: dict[str, tuple[str, str, str | None, str | None]] = {
     "license":      ("license summary", "show license summary", "show license usage", None),
     "wlans":        ("WLAN / SSID summary (Catalyst 9800)", "show wlan summary", None, None),
     "ssid":         ("everything for one SSID on a 9800: WLAN profile, policy tags, policy profiles, show wlan",
+                     "show wlan summary", None, "required"),
+    "ssid-auth":    ("clients on one SSID by EAP type (PEAP, EAP-TLS...) on 9800 WLCs; defaults to every 9800 in NetBox",
                      "show wlan summary", None, "required"),
     "wclient":      ("wireless client by MAC on the WLCs (9800 and AireOS): AP, SSID, VLAN, IP, state, user; "
                      "defaults to every WLC in NetBox", "show wireless client mac-address {arg} detail", None, "required"),
@@ -367,6 +370,28 @@ def parse_wireless_client(output: str) -> dict[str, str]:
     return found if (found.get("mac") or found.get("ap")) else {}
 
 
+def wlan_ids_for_ssid(wlan_summary: str, ssid: str) -> list[str]:
+    """WLAN IDs in 'show wlan summary' whose SSID or profile name equals ssid (case-insensitive)."""
+    rows = re.findall(r"^\s*(\d+)\s+(.+?)\s{2,}(.+?)\s{2,}(?:UP|DOWN)\b", wlan_summary, re.M | re.I)
+    return [i for i, prof, name in rows if ssid.lower() in (prof.strip().lower(), name.strip().lower())]
+
+
+def clients_on_wlans(client_summary: str, wlan_ids: list[str]) -> list[str]:
+    """MACs (aaaa.bbbb.cccc) of clients on those WLAN IDs in 'show wireless client summary'."""
+    macs = []
+    for line in client_summary.splitlines():
+        m = re.match(r"^\s*([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\s.*?\bWLAN\s+(\d+)\b", line, re.I)
+        if m and m.group(2) in wlan_ids:
+            macs.append(m.group(1).lower())
+    return macs
+
+
+def parse_eap_type(detail: str) -> str:
+    """'EAP Type' of 'show wireless client mac-address <mac> detail' (PEAP, EAP-TLS...), else '(none)'."""
+    m = re.search(r"^\s*EAP Type\s*:\s*(\S.*?)\s*$", detail, re.M)
+    return m.group(1) if m else "(none)"
+
+
 def parent_interface(name: str) -> str:
     """GigabitEthernet0/0/1.110 -> GigabitEthernet0/0/1."""
     return name.split(".")[0]
@@ -389,6 +414,7 @@ class CiscoRunner:
         self.creds = vault_helper.get_secrets(interactive=False)
         self.timeout = timeout
         self.workers = workers
+        self.transport = "auto"  # auto = NETCONF when TCP 830 is open and the command has a NETCONF version, else SSH
         self._nb = None
 
     @property
@@ -488,6 +514,19 @@ class CiscoRunner:
             parts.append((f"show wlan name {profile}", show(f"show wlan name {profile}")))
         return "\n\n".join(f"== {title}\n{body}" for title, body in parts)
 
+    @staticmethod
+    def _collect_ssid_auth(conn: Any, ssid: str, timeout: int) -> dict[str, Any]:
+        """Count a 9800's clients on one SSID by EAP type: one 'show wireless client ... detail' per client."""
+        def show(command: str) -> str:
+            return conn.send_command(validate_show(command), read_timeout=timeout * 4)
+
+        ids = wlan_ids_for_ssid(show("show wlan summary"), ssid)
+        if not ids:
+            return {"ssid": ssid, "wlan_ids": [], "clients": 0, "by_eap": {}}
+        macs = clients_on_wlans(show("show wireless client summary"), ids)
+        eap = Counter(parse_eap_type(show(f"show wireless client mac-address {mac} detail")) for mac in macs)
+        return {"ssid": ssid, "wlan_ids": ids, "clients": len(macs), "by_eap": dict(eap.most_common())}
+
     def connect(self, device: dict[str, Any]) -> Any:
         """Open an SSH session to a device (in enable mode when possible). Use it as a context manager."""
         from netmiko import ConnectHandler
@@ -506,6 +545,39 @@ class CiscoRunner:
                 pass
         return conn
 
+    def _try_netconf(self, device: dict[str, Any], command_name: str | None, raw_command: str | None,
+                     arg: str | None, parse: bool, result: dict[str, Any]) -> str | None:
+        """Check NETCONF (TCP 830) before SSH. Returns the command's output over NETCONF, or None to use SSH.
+        Sets result['netconf_port'], and result['transport'] / result['netconf_error'] as it goes.
+        With --transport netconf, a device that can't answer over NETCONF is an error instead of a fallback."""
+        import netconf_helper
+
+        if self.transport == "ssh" or device["device_type"] not in ("cisco_ios", "cisco_xe"):
+            if self.transport == "netconf":
+                raise CiscoError(f"NETCONF is not available on {device['device_type']} devices")
+            return None
+        result["netconf_port"] = netconf_helper.port_open(device["host"])
+        reason = None
+        if not result["netconf_port"]:
+            reason = "TCP 830 closed"
+        elif raw_command or parse or command_name not in netconf_helper.RENDERERS:
+            reason = "no NETCONF version of this command"
+        else:
+            try:
+                output = netconf_helper.query(device["host"], self.creds, command_name, arg, device, self.timeout)
+                result["transport"] = "netconf"
+                return output
+            except Exception as exc:  # noqa: BLE001 - any NETCONF problem falls back to SSH
+                reason = f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
+                result["netconf_error"] = reason
+        if self.transport == "netconf":
+            raise CiscoError(f"NETCONF failed: {reason}")
+        return None
+
+    @staticmethod
+    def _netconf_label(command_name: str | None, arg: str | None) -> str:
+        return f"NETCONF {command_name}" + (f" {arg}" if arg else "")
+
     def _run_one(self, device: dict[str, Any], command_name: str | None, raw_command: str | None,
                  arg: str | None, lines: int | None, parse: bool, vrf: str | None = None) -> dict[str, Any]:
         from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
@@ -517,6 +589,12 @@ class CiscoRunner:
                 if not arg:
                     raise CiscoError("'ssid' needs an SSID name")
                 command = f"ssid {arg} (show wlan summary, running-config sections, show wlan name)"
+            elif command_name == "ssid-auth":
+                if not arg:
+                    raise CiscoError("'ssid-auth' needs an SSID name")
+                if device["device_type"] == "cisco_wlc_ssh":
+                    raise CiscoError("AireOS WLC: ssid-auth supports Catalyst 9800 only")
+                command = f"ssid-auth {arg} (show wlan summary, show wireless client summary, client detail per client)"
             elif command_name == "wclient":
                 mac = parse_mac(arg or "")
                 if not mac:
@@ -532,13 +610,21 @@ class CiscoRunner:
             else:
                 command = validate_show(raw_command) if raw_command else build_command(command_name, device["device_type"], arg)
             result["command"] = command
-            with self.connect(device) as conn:
-                if command_name == "ssid":
-                    output = self._collect_ssid(conn, arg, self.timeout)
-                else:
-                    output = conn.send_command(command, read_timeout=self.timeout * 4, use_textfsm=parse)
-                if command_name == "route" and arg and isinstance(output, str) and classify_route(output) == "found":
-                    result["route_detail"] = self._resolve_route(conn, parse_route(output), vrf)
+            output = self._try_netconf(device, command_name, raw_command, arg, parse, result)
+            if output is not None:
+                result["command"] = self._netconf_label(command_name, arg)
+            else:
+                result["transport"] = "ssh"
+                with self.connect(device) as conn:
+                    if command_name == "ssid":
+                        output = self._collect_ssid(conn, arg, self.timeout)
+                    elif command_name == "ssid-auth":
+                        result["ssid_auth"] = self._collect_ssid_auth(conn, arg, self.timeout)
+                        output = json.dumps(result["ssid_auth"])
+                    else:
+                        output = conn.send_command(command, read_timeout=self.timeout * 4, use_textfsm=parse)
+                    if command_name == "route" and arg and isinstance(output, str) and classify_route(output) == "found":
+                        result["route_detail"] = self._resolve_route(conn, parse_route(output), vrf)
             if isinstance(output, str):
                 if CONFIG_WORDS.search(command):
                     output = mask_secrets(output)
@@ -936,6 +1022,9 @@ def main() -> int:
     parser.add_argument("--append", action="store_true", help="with --output: append instead of overwriting")
     parser.add_argument("--workers", type=int, default=10, help="devices at once (default 10)")
     parser.add_argument("--timeout", type=int, default=30, help="SSH timeout in seconds (default 30)")
+    parser.add_argument("--transport", choices=("auto", "netconf", "ssh"), default="auto",
+                        help="auto (default): check TCP 830 first and use NETCONF for commands that have a NETCONF "
+                             "version, else SSH; netconf: NETCONF only; ssh: skip the NETCONF check")
     parser.add_argument("--max-devices", type=int, default=25, help="refuse to run on more devices than this (default 25)")
     args = parser.parse_args()
 
@@ -975,7 +1064,8 @@ def main() -> int:
         if not (args.device or args.site or args.tag or args.name):
             args.tag = "wan_router"  # route lookups default to every WAN router
     wclient = args.command == "wclient"
-    default_wlcs = wclient and not (args.device or args.site or args.tag or args.name)
+    ssid_auth = args.command == "ssid-auth"
+    default_wlcs = (wclient or ssid_auth) and not (args.device or args.site or args.tag or args.name)
     if default_wlcs:
         args.name = "wlc"  # every NetBox device with "wlc" in its name
         args.max_devices = max(args.max_devices, 60)
@@ -986,9 +1076,12 @@ def main() -> int:
         if not (args.device or args.site or args.tag or args.name):
             raise CiscoError("pick devices with -d <name|ip>, --site, --tag or --name")
         runner = CiscoRunner(timeout=args.timeout, workers=args.workers)
+        runner.transport = args.transport
         devices = runner.resolve(args.device, args.site, args.tag, args.name, args.device_type)
         if default_wlcs:
             devices = [d for d in devices if is_ip(d["host"])]  # standby units have no management IP
+            if ssid_auth:
+                devices = [d for d in devices if d["device_type"] != "cisco_wlc_ssh"]  # 9800 only
     except (CiscoError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1009,12 +1102,13 @@ def main() -> int:
 
     if args.json:
         text = json.dumps(results, indent=2, default=str)
-    elif wclient:
+    elif wclient or ssid_auth:
         text = ""  # only the summary below; the raw output is in --json
     else:
         chunks = []
         for r in results:
-            chunks.append(f"===== {r['device']} ({r['host']}){'  ' + r['site'] if r['site'] else ''} : {r['command'] or ''}")
+            via = f"  [{r['transport']}]" if r.get("transport") else ""
+            chunks.append(f"===== {r['device']} ({r['host']}){'  ' + r['site'] if r['site'] else ''}{via} : {r['command'] or ''}")
             if r["error"]:
                 chunks.append(f"ERROR: {r['error']}")
             else:
@@ -1039,6 +1133,18 @@ def main() -> int:
                                  for h in d.get("next_hops", []))
                 route = f"{d.get('prefix', '')} {d.get('protocol', '')} [{d.get('distance', '')}/{d.get('metric', '')}] {hops}" if d else ""
                 print(f"  {r['device']:<{width}}  {r['host']:<15}  {status:<9}  {route or r['error'] or ''}")
+        if ssid_auth:
+            total: Counter = Counter()
+            for r in results:
+                a = r.get("ssid_auth")
+                if a and a["clients"]:
+                    total.update(a["by_eap"])
+                    print(f"  {r['device']} ({r['host']}): {a['clients']} clients  "
+                          + "  ".join(f"{k} {v}" for k, v in a["by_eap"].items()))
+            print(f"SSID {args.arg}: {sum(total.values())} clients  " + "  ".join(f"{k} {v}" for k, v in total.most_common()))
+            errors = [r for r in results if r["error"]]
+            if errors:
+                print("  errors: " + "; ".join(f"{r['device']}: {r['error']}" for r in errors))
         if wclient:
             hits = [r for r in results if r.get("wclient")]
             print(f"Wireless client {args.arg}: found on {len(hits)} of {len(results)} WLCs")

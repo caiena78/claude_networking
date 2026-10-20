@@ -7,6 +7,8 @@ description: Running read-only show commands on Cisco routers, switches and WLCs
 
 **Use `cisco_helper.py` for anything run on a router or switch.** Never write ad-hoc netmiko or Python snippets. If a command or option is missing, add it to `cisco_helper.py` (the `COMMANDS` table), then use it. The helper reads the SSH credentials from Vault, finds devices through NetBox, runs on many devices at once, only sends single `show` commands (it refuses anything else and any `| redirect/tee/append/copy`), and masks passwords, keys, communities and hashes in config output.
 
+**NETCONF first.** Before a command runs on an IOS/IOS-XE device, `cisco_helper.py` checks TCP 830. If it is open and the command has a NETCONF version, it queries over NETCONF (`get` only) and prints the same kind of table; otherwise it uses SSH. The header shows `[netconf]` or `[ssh]`, and `--json` has `transport`, `netconf_port` and, after a failed attempt, `netconf_error`. `--transport ssh` skips NETCONF, `--transport netconf` fails instead of falling back. Commands with a NETCONF version: `python netconf_helper.py list` (version, uptime, clock, interfaces, interface, errors, cpu, memory, arp, cdp, lldp, ntp, wlans). Everything else stays on SSH: `show "..."`, `run`, `section`, `log`, `route`, `locate`, `bgp`, `ospf`, `wclient`, `ssid`, `ssid-auth` (the YANG client model has no EAP type), `--parse`, AireOS WLCs and devices with 830 closed. NETCONF output is a rendered table, not the CLI text. `interface` over NETCONF needs the full interface name (`TenGigabitEthernet0/1/0`); abbreviations fall back to SSH. The WLAN PSK is returned in clear text by NETCONF, so the helper never selects it and masks it in `netconf_helper.py get`. Use `netconf_helper.py caps|get|schema` to explore a device's YANG models before adding a command.
+
 Choosing devices (combine as needed; at most 25 by default, change with `--max-devices`):
 - `-d <name|ip>` (repeatable). Names are looked up in NetBox (exact name, else name contains). IPs connect directly as `cisco_ios` (set `--device-type`).
 - `--site <name or slug>`, e.g. `--site Lakeside`. `--tag <tag>`, e.g. `--tag wan_router`. `--name <text>`.
@@ -33,11 +35,13 @@ python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01  
 python cisco_helper.py wlans -d lakeview-wlc-ha01                 # Catalyst 9800: WLAN/SSID summary
 python cisco_helper.py ssid LCMC-DATA -d lakeview-wlc-ha01 -o lakeviewssid.txt   # all config for an SSID
 python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt --append
+python cisco_helper.py ssid-auth LCMC-VOIP                     # clients on an SSID by EAP type (PEAP vs EAP-TLS) on every 9800; add -d/--site to narrow
 python cisco_helper.py wclient 78:02:8b:19:63:0e                  # wireless client on every WLC in NetBox (9800 + AireOS): AP, SSID, VLAN, IP, user
 python cisco_helper.py wclient <mac> -d umc-wlc-8540-01            # one controller; anchor/foreign mobility is shown
 ```
 
 - `-o FILE` also writes the results to a file (`--append` adds to it). Use it when the user asks for output in a file. `.gitignore` excludes `*.txt`.
+- `ssid-auth <ssid>` (Catalyst 9800 only; AireOS is skipped) maps the SSID to its WLAN IDs, lists the clients on them and reads `EAP Type` from each client's detail, so it runs one command per client and is slow (about 3 minutes for 226 clients; use `--timeout`/`--workers` as needed). `--json` has `ssid_auth` per WLC. EAP type `Not Applicable` means no 802.1x EAP (e.g. PSK or a roaming/anchor stub). ISE gives the same split faster: `ise_helper.py active --protocols --ssid <ssid>`.
 - `ssid <name>` (Catalyst 9800) matches the SSID or the WLAN profile name, so it handles one SSID on several profiles (e.g. LCMC-DATA = `LCMC-DATA_SBH` and `LCMC-DATA_profile`). For each profile it collects the `wlan` config, the policy tags that map it, each policy profile's config, and `show wlan name`. PSKs (`set-key`) are masked.
 - 9800 WLCs are IOS-XE (`cisco_xe`) in NetBox, e.g. `lakeview-wlc-ha01` (10.158.8.21), `lakeview-wlc-stby`, `lakeview-wlc-guest01`.
 - `--json` gives `[{device, host, site, command, output, error}]` (route lookups add `route_result`). `--parse` turns the output into structured data with TextFSM (ntc-templates) where a template exists, e.g. `interfaces --parse --json`.

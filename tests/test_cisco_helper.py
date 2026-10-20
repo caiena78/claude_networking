@@ -177,3 +177,26 @@ VLAN............................................. 21
     w = c.parse_wireless_client(out)
     assert w["mobility"] == "Anchor" and w["foreign_wlc"] == "10.21.64.16" and w["ssid"] == "LCMC-IoT"
     assert c.parse_wireless_client("Client not found") == {}
+
+
+WLAN_SUMMARY = """ID   Profile Name                     SSID                             Status Security
+----------------------------------------------------------------------------------------------------
+11   LCMC-DATA_profile                LCMC-DATA                        UP     [WPA2][FT + 802.1x][AES]
+13   LCMC-VOIP_profile                LCMC-VOIP                        UP     [WPA2 + WPA3][FT + 802.1x][AES]
+2416 EJGH Voice 8821                  EJGH-VOICE                       UP     [WPA2][FT + 802.1x][AES]
+"""
+CLIENT_SUMMARY = """MAC Address    AP Name         Type ID   State             Protocol Method     Role
+-------------------------------------------------------------------------------
+0017.2388.7FAA EJ-5-OUTED-AP08 WLAN 13   Run               11ac     Dot1x      Local
+6887.c64f.a5ba EJ-3FL-NORTH    WLAN 2416 Run               11ac     Dot1x      Local
+aaaa.bbbb.cccc EJ-3FL-NORTH    WLAN 11   Run               11ac     Dot1x      Local
+"""
+
+
+def test_ssid_auth_parsers():
+    assert c.wlan_ids_for_ssid(WLAN_SUMMARY, "lcmc-voip") == ["13"]
+    assert c.wlan_ids_for_ssid(WLAN_SUMMARY, "EJGH Voice 8821") == ["2416"]
+    assert c.wlan_ids_for_ssid(WLAN_SUMMARY, "nope") == []
+    assert c.clients_on_wlans(CLIENT_SUMMARY, ["13", "2416"]) == ["0017.2388.7faa", "6887.c64f.a5ba"]
+    assert c.parse_eap_type("Policy Type : WPA2\nEAP Type : EAP-TLS\nVLAN : x\n") == "EAP-TLS"
+    assert c.parse_eap_type("Client State : Associated\n") == "(none)"

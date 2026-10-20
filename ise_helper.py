@@ -353,31 +353,39 @@ class ISE:
         rows = rows if isinstance(rows, list) else [rows]
         return rows[:max_items] if max_items else rows
 
-    def session_protocols(self, workers: int = 8) -> dict[str, Any]:
+    def session_protocols(self, workers: int = 8, ssid: str | None = None) -> dict[str, Any]:
         """Count active sessions by authentication protocol (EAP-TLS, PEAP, MAB...).
 
-        The active list has no protocol field, so each session's detail is fetched by MAC."""
+        The active list has no protocol field, so each session's detail is fetched by MAC.
+        With ssid, only sessions whose detail says cisco-wlan-ssid=<ssid> (case-insensitive) are counted."""
         from collections import Counter
         from concurrent.futures import ThreadPoolExecutor
 
         sessions = self.active_sessions()
         macs = [s.get("calling_station_id") for s in sessions if s.get("calling_station_id")]
 
-        def detail(mac: str) -> tuple[str, str]:
+        def detail(mac: str) -> tuple[str, str] | None:
             try:
                 s = self.session(mac) or {}
             except ISEError:
-                return ("(lookup failed)", "")
+                return ("(lookup failed)", "") if not ssid else None
+            if ssid:
+                m = re.search(r"cisco-wlan-ssid=([^,:]+)", s.get("other_attr_string") or "")
+                if not m or m.group(1).lower() != ssid.lower():
+                    return None
             return (s.get("authentication_protocol") or "(no session detail)", s.get("authentication_method") or "")
 
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            results = list(pool.map(detail, macs))
-        return {
+            results = [r for r in pool.map(detail, macs) if r]
+        out = {
             "active_sessions": len(sessions),
             "looked_up": len(macs),
             "by_protocol": dict(Counter(p for p, _ in results).most_common()),
             "by_method": dict(Counter(m or "(none)" for _, m in results).most_common()),
         }
+        if ssid:
+            out.update(ssid=ssid, matched=len(results))
+        return out
 
     # -- network devices and groups -----------------------------------------
 
@@ -525,6 +533,7 @@ def main() -> int:
     p.add_argument("--count", action="store_true", help="Only print the number of active sessions")
     p.add_argument("--protocols", action="store_true",
                    help="Count active sessions by auth protocol (EAP-TLS, PEAP...) and method (dot1x, mab)")
+    p.add_argument("--ssid", help="With --protocols: only sessions on this wireless SSID (e.g. LCMC-VOIP)")
     p.add_argument("--summary", action="store_true",
                    help="Counts over all active sessions: totals, by PSN (server) and by NAS IP")
     p.add_argument("--limit", type=int, default=None,
@@ -585,7 +594,7 @@ def main() -> int:
         if args.count:
             out.add(str(ise.active_count()))
         elif args.protocols:
-            _emit(out, args, ise.session_protocols())
+            _emit(out, args, ise.session_protocols(ssid=args.ssid))
         elif args.summary:
             _emit_summary(out, args, summarize_sessions(ise.active_sessions(), args.limit or None))
         else:
