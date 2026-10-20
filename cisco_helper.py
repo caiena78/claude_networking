@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import logging
 import re
 import sys
 from collections import Counter
@@ -42,6 +43,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from helper_common import table
+import cisco_common
+from cisco_common import CiscoError, mac_formats, mask_secrets, parse_mac, validate_show
+from cisco_parse import cdp_neighbor_kind, parse_arp, parse_cdp_detail, parse_mac_table, parse_port_channel_members
+from cisco_wlc import (client_counts_by_wlan, clients_on_wlans, collect_ssid, collect_ssid_aireos,  # noqa: F401
+                       collect_ssid_auth, collect_ssid_clients, collect_ssid_counts, is_aireos, parse_eap_type,
+                       parse_wireless_client, wlan_ids_for_ssid, wlan_rows, wlc_commands)
+
+logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)  # no "Socket exception" lines when a WLC drops the session
 
 # name: (help text, IOS / IOS-XE command, NX-OS command or None for "same", argument: None / "required" / "optional")
 # In commands, {arg} is replaced with the argument. Optional-argument commands list the no-argument form after "||".
@@ -115,16 +124,6 @@ AIREOS_COMMANDS = {
 
 # Output of these commands can include config, so secrets are masked.
 CONFIG_WORDS = re.compile(r"\b(run|running-config|startup-config|config|tech)", re.I)
-# Greedy ".*" so the LAST keyword on the line is used, e.g. "message-digest-key 1 md5 7 <secret>".
-SECRET_LINE = re.compile(
-    r"(?i)^(.*\b(?:secret|password|key-string|key|community|server-key|pre-shared-key|auth-key|"
-    r"authentication-key|md5)\b(?:\s+[0-9]{1,2})?\s+)(?!Management\b)(\S+)(.*)$"  # not "Auth Key Management"
-)
-DESCRIPTION_LINE = re.compile(r"^\s*description\s", re.I)
-# WLAN PSKs: "security wpa psk set-key ascii 8 <key>", MPSK "priority 0 set-key ascii 0 <key>".
-SET_KEY_LINE = re.compile(r"(?i)^(.*\bset-key\s+(?:ascii|hex)\s+\d+\s+)(\S+)(.*)$")
-# Pipes that write files or change state are never allowed.
-FORBIDDEN_PIPES = re.compile(r"\|\s*(redirect|tee|append|copy)\b", re.I)
 TRIM_LINES = {"cpu": 30}
 
 
@@ -150,10 +149,6 @@ def default_vrf(device: dict[str, Any]) -> str | None:
     if (device.get("role") or "").lower() == "core":
         return CORE_VRFS.get(device.get("site") or "")
     return None
-
-
-class CiscoError(Exception):
-    """Bad command or target (never contains credentials)."""
 
 
 def parse_route_target(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | ipaddress.IPv4Network | ipaddress.IPv6Network:
@@ -221,29 +216,6 @@ def classify_route(output: str) -> str:
     return "found" if ROUTE_FOUND.search(text) else "not found"
 
 
-def validate_show(command: str) -> str:
-    """Allow only a single read-only `show` command."""
-    command = command.strip()
-    if "\n" in command or "\r" in command:
-        raise CiscoError("only one command at a time")
-    if not re.match(r"^show\s+\S", command, re.I):
-        raise CiscoError(f"only 'show' commands are allowed: {command!r}")
-    if FORBIDDEN_PIPES.search(command):
-        raise CiscoError(f"output redirection is not allowed: {command!r}")
-    return command
-
-
-def mask_secrets(text: str) -> str:
-    """Replace passwords, keys, communities and hashes in config output with <removed>."""
-    def mask(line: str) -> str:
-        if DESCRIPTION_LINE.match(line):
-            return line
-        m = SET_KEY_LINE.match(line) or SECRET_LINE.match(line)
-        return m.group(1) + "<removed>" + m.group(3) if m else line
-
-    return "\n".join(mask(line) for line in text.splitlines())
-
-
 def build_command(name: str, device_type: str, arg: str | None = None) -> str:
     """Return the show command for a built-in command name on a platform."""
     if name not in COMMANDS:
@@ -263,189 +235,6 @@ def build_command(name: str, device_type: str, arg: str | None = None) -> str:
         with_arg, without_arg = template.split("||")
         template = with_arg if arg else without_arg
     return validate_show(template.format(arg=arg or ""))
-
-
-# ---------------------------------------------------------------------------
-# IP -> switchport trace (locate): parsers for ARP, MAC table, port-channel and CDP output
-# ---------------------------------------------------------------------------
-
-CISCO_MAC = r"[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}"
-# MAC table "ports" that aren't real ports.
-NOT_A_PORT = re.compile(r"^(CPU|Router|Switch|Drop|sup-eth\d*|vPC Peer-Link|Sup)$", re.I)
-
-
-def parse_mac(text: str) -> str | None:
-    """aabb.ccdd.eeff for a MAC in any common format (aa:bb:.., aa-bb-.., aabb.ccdd.eeff), else None."""
-    if not re.fullmatch(r"[0-9a-fA-F:.\-]{12,17}", text.strip()):
-        return None
-    hexes = re.sub(r"[^0-9a-fA-F]", "", text).lower()
-    return f"{hexes[0:4]}.{hexes[4:8]}.{hexes[8:12]}" if len(hexes) == 12 else None
-
-
-def mac_formats(cisco_mac: str) -> dict[str, str]:
-    """aabb.ccdd.eeff -> {'cisco': ..., 'colon': 'aa:bb:cc:dd:ee:ff'}."""
-    hexes = re.sub(r"[^0-9a-f]", "", cisco_mac.lower())
-    return {"cisco": cisco_mac.lower(), "colon": ":".join(hexes[i:i + 2] for i in range(0, 12, 2))}
-
-
-def parse_arp(output: str, ip: str) -> dict[str, str] | None:
-    """MAC and interface for an IP from 'show ip arp <ip>' (IOS / IOS-XE / NX-OS)."""
-    for line in output.splitlines():
-        if not re.search(rf"(^|\s){re.escape(ip)}(\s|$)", line):
-            continue
-        mac = re.search(CISCO_MAC, line)
-        if mac:
-            return {"mac": mac.group(0).lower(), "interface": line.split()[-1]}
-    return None
-
-
-def parse_mac_table(output: str, mac: str) -> list[dict[str, str]]:
-    """[{vlan, port, type}] for a MAC from 'show mac address-table address <mac>'."""
-    rows = []
-    for line in output.splitlines():
-        if mac.lower() not in line.lower():
-            continue
-        tokens = line.replace("*", " ").split()
-        vlan = next((t for t in tokens if t.isdigit()), "")
-        port = tokens[-1] if tokens else ""
-        kind = next((t for t in tokens if t.lower() in ("dynamic", "static", "secure")), "")
-        if port and not NOT_A_PORT.match(port) and not re.fullmatch(CISCO_MAC, port):
-            rows.append({"vlan": vlan, "port": port, "type": kind.lower()})
-    return rows
-
-
-def parse_port_channel_members(output: str, port_channel: str) -> list[str]:
-    """Member ports (bundled first) of a port-channel from 'show etherchannel / port-channel summary'."""
-    number = re.sub(r"\D", "", port_channel)
-    lines = output.splitlines()
-    for i, line in enumerate(lines):
-        if re.search(rf"\bPo{number}\(", line):
-            # Members can wrap onto the next lines; collect until the next group number.
-            text = line
-            for nxt in lines[i + 1:]:
-                if re.match(r"^\s*\d+\s+Po\d+", nxt) or not nxt.strip():
-                    break
-                text += " " + nxt
-            members = re.findall(r"(\S+?)\((\w+)\)", text.split(f"Po{number}(", 1)[1])
-            bundled = [m for m, flag in members if flag in ("P", "p", "bndl")]
-            return bundled or [m for m, _ in members]
-    return []
-
-
-def parse_cdp_detail(output: str) -> list[dict[str, str]]:
-    """Neighbors from 'show cdp neighbors <port> detail': device_id, ip, platform, capabilities, port, remote_port."""
-    neighbors = []
-    for block in re.split(r"^-{5,}\s*$", output, flags=re.M):
-        dev = re.search(r"Device ID:\s*(\S+)", block)
-        if not dev:
-            continue
-        ip = re.search(r"(?:IP address|IPv4 Address):\s*(\d+\.\d+\.\d+\.\d+)", block)
-        plat = re.search(r"Platform:\s*([^,\n]+)", block)
-        caps = re.search(r"Capabilities:\s*([^\n]+)", block)
-        intf = re.search(r"Interface:\s*([^,\n]+),\s*Port ID \(outgoing port\):\s*(\S+)", block)
-        neighbors.append({
-            "device_id": dev.group(1), "ip": ip.group(1) if ip else "",
-            "platform": plat.group(1).strip() if plat else "", "capabilities": caps.group(1).strip() if caps else "",
-            "port": intf.group(1).strip() if intf else "", "remote_port": intf.group(2) if intf else "",
-        })
-    return neighbors
-
-
-def cdp_neighbor_kind(neighbor: dict[str, str]) -> str:
-    """'switch' for a Cisco switch/router we can follow, 'meraki', 'ap', 'phone', or 'other'."""
-    plat, caps = neighbor["platform"].lower(), neighbor["capabilities"].lower()
-    if "meraki" in plat or plat.startswith(("ms", "mr", "mx")):
-        return "meraki"
-    if "phone" in caps or "phone" in plat:
-        return "phone"
-    if "trans-bridge" in caps or re.search(r"\bair-|\bap\b|c91\d\dax|cw91\d\d", plat):
-        return "ap"
-    if "switch" in caps or "router" in caps:
-        return "switch"
-    return "other"
-
-
-# "Key ....... value" (AireOS) or "Key : value" (9800) -> canonical field name.
-WCLIENT_FIELDS = {
-    "client mac address": "mac", "client ipv4 address": "ip", "ip address": "ip",
-    "ap name": "ap", "wireless lan network name (ssid)": "ssid", "wireless lan network name": "ssid",
-    "vlan": "vlan", "client state": "state", "policy manager state": "policy_state", "policy state": "policy_state",
-    "client username": "user", "client user name": "user", "username": "user",
-    "wireless lan profile name": "wlan_profile", "radio type": "radio", "connected for": "connected_for",
-    "mobility state": "mobility", "mobility role": "mobility",
-    "mobility foreign ip address": "foreign_wlc", "mobility anchor ip address": "anchor_wlc",
-}
-
-
-def parse_wireless_client(output: str) -> dict[str, str]:
-    """Key fields of 'show wireless client mac-address <mac> detail' (9800) or 'show client detail <mac>'
-    (AireOS). Empty dict when the client isn't on that controller."""
-    found: dict[str, str] = {}
-    for line in output.splitlines():
-        m = re.match(r"^\s*([A-Za-z0-9 ()/\-]+?)\s*(?:\.{2,}|:)\s*(.+?)\s*$", line)
-        if not m:
-            continue
-        key = WCLIENT_FIELDS.get(m.group(1).strip().lower())
-        if key and key not in found and m.group(2).strip():
-            found[key] = m.group(2).strip()
-    return found if (found.get("mac") or found.get("ap")) else {}
-
-
-def is_aireos(device: dict[str, Any]) -> bool:
-    """AireOS WLC (5508, 5520, 8540, 3504...): NetBox platform airos, netmiko type cisco_wlc_ssh."""
-    return device["device_type"] == "cisco_wlc_ssh"
-
-
-def wlan_rows(wlan_summary: str) -> dict[str, tuple[str, str, str]]:
-    """WLAN ID -> (profile, SSID, 'UP'/'DOWN') from 'show wlan summary' on a 9800 or an AireOS WLC."""
-    rows = {i: (prof.strip(), name.strip(), st.upper()) for i, prof, name, st in re.findall(
-        r"^\s*(\d+)\s+(.+?)\s{2,}(.+?)\s{2,}(UP|DOWN)\b", wlan_summary, re.M | re.I)}
-    # AireOS rows: "1   LCMC-Guest / LCMC-Guest   Enabled   interface   none"
-    for i, prof, name, st in re.findall(r"^\s*(\d+)\s+(.+?) / (.+?)\s{2,}(Enabled|Disabled)\b", wlan_summary, re.M):
-        rows[i] = (prof.strip(), name.strip(), "UP" if st == "Enabled" else "DOWN")
-    return rows
-
-
-def wlan_ids_for_ssid(wlan_summary: str, ssid: str) -> list[str]:
-    """WLAN IDs whose SSID or profile name equals ssid (case-insensitive)."""
-    return [i for i, (prof, name, _) in wlan_rows(wlan_summary).items() if ssid.lower() in (prof.lower(), name.lower())]
-
-
-def parse_client_summary(client_summary: str) -> list[tuple[str, str]]:
-    """(MAC as aaaa.bbbb.cccc, WLAN ID) per client from 'show wireless client summary' (9800) or
-    'show client summary' (AireOS: the row is MAC, AP, slot, status, WLAN, auth, ...)."""
-    out = []
-    for line in client_summary.splitlines():
-        m = (re.match(r"^\s*([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\s.*?\bWLAN\s+(\d+)\b", line, re.I)
-             or re.match(r"^\s*([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+\S+\s+\S+\s+\S+\s+(\d+)\s+(?:Yes|No)\b", line, re.I))
-        if m:
-            out.append((parse_mac(m.group(1)), m.group(2)))
-    return out
-
-
-def client_counts_by_wlan(client_summary: str) -> Counter:
-    """Clients per WLAN ID."""
-    return Counter(wid for _, wid in parse_client_summary(client_summary))
-
-
-def clients_on_wlans(client_summary: str, wlan_ids: list[str]) -> list[str]:
-    """MACs (aaaa.bbbb.cccc) of clients on those WLAN IDs."""
-    return [mac for mac, wid in parse_client_summary(client_summary) if wid in wlan_ids]
-
-
-def parse_eap_type(detail: str) -> str:
-    """'EAP Type' of one client's detail (9800 'EAP Type : PEAP', AireOS 'EAP Type.... PEAP'), else '(none)'."""
-    m = re.search(r"^\s*EAP Type\s*(?::|\.{2,})\s*(\S.*?)\s*$", detail, re.M)
-    return m.group(1) if m else "(none)"
-
-
-def wlc_commands(device: dict[str, Any]) -> tuple[str, str, Any]:
-    """(WLAN summary command, client summary command, client detail command for a dotted MAC)."""
-    if is_aireos(device):
-        return ("show wlan summary", "show client summary",
-                lambda mac: f"show client detail {mac_formats(mac)['colon']}")
-    return ("show wlan summary", "show wireless client summary",
-            lambda mac: f"show wireless client mac-address {mac} detail")
 
 
 def parent_interface(name: str) -> str:
@@ -528,103 +317,6 @@ class CiscoRunner:
                 hop["interface"] = first["interface"]
                 hop["resolved_via"] = f"{inner['prefix']} {inner['protocol']} -> {first['next_hop']}"
         return detail
-
-    @staticmethod
-    def _collect_ssid(conn: Any, ssid: str, timeout: int) -> str:
-        """Gather every piece of config for one SSID on a Catalyst 9800 and return it as text.
-
-        9800 config is split across the WLAN profile, the policy tags that map the WLAN to a policy
-        profile, and the policy profiles themselves, so this runs several show commands."""
-        def show(command: str) -> str:
-            command = validate_show(command)
-            return mask_secrets(conn.send_command(command, read_timeout=timeout * 4)).rstrip()
-
-        parts: list[tuple[str, str]] = []
-        summary = show("show wlan summary")
-        # Rows look like: "ID   Profile Name   SSID   Status   Security".
-        rows = re.findall(r"^\s*(\d+)\s+(\S+)\s+(\S+)\s+(UP|DOWN)\b", summary, re.M | re.I)
-        profiles = [prof for _, prof, wlan_ssid, _ in rows if ssid.lower() in (wlan_ssid.lower(), prof.lower())]
-        if not profiles:
-            return f"No WLAN with SSID or profile name {ssid!r} on this controller.\n\n== show wlan summary\n{summary}"
-        matching = [line for line in summary.splitlines()
-                    if any(re.search(rf"\s{re.escape(p)}\s", f" {line} ") for p in profiles)]
-        parts.append(("show wlan summary (matching rows)", "\n".join(matching)))
-
-        tags = show("show running-config | section wireless tag policy")
-        for profile in profiles:
-            parts.append((f"WLAN profile {profile}", show(f"show running-config | section ^wlan {profile} ")))
-            # Policy tags that carry this WLAN, and the policy profile each one maps it to.
-            mappings: list[tuple[str, str]] = []
-            current_tag = None
-            for line in tags.splitlines():
-                if m := re.match(r"^wireless tag policy (\S+)", line):
-                    current_tag = m.group(1)
-                elif current_tag and (m := re.match(rf"^\s+wlan {re.escape(profile)} policy (\S+)", line)):
-                    mappings.append((current_tag, m.group(1)))
-            parts.append((f"Policy tags using {profile}",
-                          "\n".join(f"policy tag {tag:<30} -> policy profile {pp}" for tag, pp in mappings)
-                          or "(not in any policy tag)"))
-            for pp in sorted({pp for _, pp in mappings}):
-                parts.append((f"Policy profile {pp}",
-                              show(f"show running-config | section wireless profile policy {pp}$")))
-            parts.append((f"show wlan name {profile}", show(f"show wlan name {profile}")))
-        return "\n\n".join(f"== {title}\n{body}" for title, body in parts)
-
-    @staticmethod
-    def _collect_ssid_aireos(conn: Any, ssid: str, timeout: int) -> str:
-        """Everything for one SSID on an AireOS WLC: the summary row and 'show wlan <id>' for each matching WLAN."""
-        def show(command: str) -> str:
-            return mask_secrets(conn.send_command(validate_show(command), read_timeout=timeout * 4)).rstrip()
-
-        summary = show("show wlan summary")
-        ids = wlan_ids_for_ssid(summary, ssid)
-        if not ids:
-            return f"No WLAN with SSID or profile name {ssid!r} on this controller.\n\n== show wlan summary\n{summary}"
-        rows = [line for line in summary.splitlines() if re.match(rf"^\s*(?:{'|'.join(ids)})\s", line)]
-        parts = [("show wlan summary (matching rows)", "\n".join(rows))]
-        parts += [(f"show wlan {i}", show(f"show wlan {i}")) for i in ids]
-        return "\n\n".join(f"== {title}\n{body}" for title, body in parts)
-
-    @staticmethod
-    def _collect_ssid_auth(conn: Any, ssid: str, timeout: int, device: dict[str, Any]) -> dict[str, Any]:
-        """Count a WLC's clients on one SSID by EAP type: one client detail command per client."""
-        def show(command: str) -> str:
-            return conn.send_command(validate_show(command), read_timeout=timeout * 4)
-
-        wlan_cmd, client_cmd, detail_cmd = wlc_commands(device)
-        ids = wlan_ids_for_ssid(show(wlan_cmd), ssid)
-        if not ids:
-            return {"ssid": ssid, "wlan_ids": [], "clients": 0, "by_eap": {}}
-        macs = clients_on_wlans(show(client_cmd), ids)
-        eap = Counter(parse_eap_type(show(detail_cmd(mac))) for mac in macs)
-        return {"ssid": ssid, "wlan_ids": ids, "clients": len(macs), "by_eap": dict(eap.most_common())}
-
-    @staticmethod
-    def _collect_ssid_clients(conn: Any, ssid: str, timeout: int, device: dict[str, Any]) -> list[str]:
-        """MACs (aa:bb:cc:dd:ee:ff) of a WLC's clients on one SSID."""
-        wlan_cmd, client_cmd, _ = wlc_commands(device)
-        ids = wlan_ids_for_ssid(conn.send_command(validate_show(wlan_cmd), read_timeout=timeout * 4), ssid)
-        summary = conn.send_command(validate_show(client_cmd), read_timeout=timeout * 4) if ids else ""
-        return [mac_formats(m)["colon"] for m in clients_on_wlans(summary, ids)]
-
-    @staticmethod
-    def _collect_ssid_counts(conn: Any, timeout: int, device: dict[str, Any]) -> list[dict[str, Any]]:
-        """Clients per SSID on a WLC (an SSID on several WLAN profiles is summed), biggest first."""
-        def show(command: str) -> str:
-            return conn.send_command(validate_show(command), read_timeout=timeout * 4)
-
-        wlan_cmd, client_cmd, _ = wlc_commands(device)
-        wlans = wlan_rows(show(wlan_cmd))
-        counts = client_counts_by_wlan(show(client_cmd))
-        by_ssid: dict[str, dict[str, Any]] = {}
-        for wid in sorted(set(wlans) | set(counts), key=int):
-            _, ssid, status = wlans.get(wid, ("", f"(unknown WLAN {wid})", ""))
-            row = by_ssid.setdefault(ssid, {"ssid": ssid, "wlan_ids": [], "status": status, "clients": 0})
-            row["wlan_ids"].append(wid)
-            if status == "UP":  # an SSID on several WLAN IDs is UP when any of them is
-                row["status"] = "UP"
-            row["clients"] += counts.get(wid, 0)
-        return sorted(by_ssid.values(), key=lambda r: -r["clients"])
 
     def connect(self, device: dict[str, Any]) -> Any:
         """Open an SSH session to a device (in enable mode when possible). Use it as a context manager."""
@@ -721,17 +413,17 @@ class CiscoRunner:
                 result["transport"] = "ssh"
                 with self.connect(device) as conn:
                     if command_name == "ssid":
-                        collect = self._collect_ssid_aireos if is_aireos(device) else self._collect_ssid
+                        collect = collect_ssid_aireos if is_aireos(device) else collect_ssid
                         output = collect(conn, arg, self.timeout)
                     elif command_name == "ssid-clients":
-                        result["ssid_clients"] = self._collect_ssid_clients(conn, arg, self.timeout, device)
+                        result["ssid_clients"] = collect_ssid_clients(conn, arg, self.timeout, device)
                         output = "\n".join(result["ssid_clients"]) or f"(no clients on {arg})"
                     elif command_name == "ssid-count":
-                        result["ssid_counts"] = self._collect_ssid_counts(conn, self.timeout, device)
+                        result["ssid_counts"] = collect_ssid_counts(conn, self.timeout, device)
                         output = table([{**r, "wlan_ids": ",".join(r["wlan_ids"])} for r in result["ssid_counts"]],
                                        ["SSID=ssid", "WLAN IDs=wlan_ids", "Status=status", "Clients=clients"])
                     elif command_name == "ssid-auth":
-                        result["ssid_auth"] = self._collect_ssid_auth(conn, arg, self.timeout, device)
+                        result["ssid_auth"] = collect_ssid_auth(conn, arg, self.timeout, device)
                         output = json.dumps(result["ssid_auth"])
                     else:
                         output = conn.send_command(command, read_timeout=self.timeout * 4, use_textfsm=parse)
@@ -1134,6 +826,12 @@ def main() -> int:
     parser.add_argument("--append", action="store_true", help="with --output: append instead of overwriting")
     parser.add_argument("--workers", type=int, default=10, help="devices at once (default 10)")
     parser.add_argument("--timeout", type=int, default=30, help="SSH timeout in seconds (default 30)")
+    parser.add_argument("--raw", action="store_true",
+                        help="with --json: keep the raw device output even for commands that also return parsed data "
+                             "(wclient, ssid-count, ssid-clients, ssid-auth), which are slimmed by default")
+    parser.add_argument("--cache", type=int, default=0, metavar="SECONDS",
+                        help="ssid-count/ssid-clients/ssid-auth: reuse WLC output fetched less than this many seconds ago "
+                             "(.cache/, default 0 = always live)")
     parser.add_argument("--transport", choices=("auto", "netconf", "ssh"), default="auto",
                         help="auto (default): check TCP 830 first and use NETCONF for commands that have a NETCONF "
                              "version, else SSH; netconf: NETCONF only; ssh: skip the NETCONF check")
@@ -1189,6 +887,7 @@ def main() -> int:
             raise CiscoError("pick devices with -d <name|ip>, --site, --tag or --name")
         runner = CiscoRunner(timeout=args.timeout, workers=args.workers)
         runner.transport = args.transport
+        cisco_common.CACHE_TTL = args.cache
         devices = runner.resolve(args.device, args.site, args.tag, args.name, args.device_type)
         if default_wlcs:
             devices = [d for d in devices if is_ip(d["host"])]  # standby units have no management IP
@@ -1211,6 +910,10 @@ def main() -> int:
                          raw_command, args.lines, args.parse, args.vrf)
 
     if args.json:
+        if not args.raw:  # the parsed fields already carry the answer; the raw output is the bulk of the JSON
+            for r in results:
+                if any(r.get(k) for k in ("wclient", "ssid_counts", "ssid_clients", "ssid_auth")):
+                    r.pop("output", None)
         text = json.dumps(results, indent=2, default=str)
     elif wclient or ssid_auth:
         text = ""  # only the summary below; the raw output is in --json

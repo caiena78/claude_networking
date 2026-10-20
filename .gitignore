@@ -36,3 +36,6 @@ ftd_interfaces.json
 # Investigation reports (internal hostnames, IPs, endpoint names)
 reports/
 *.pdf
+
+# Cached WLC show output (cisco_helper.py --cache)
+.cache/

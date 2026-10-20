@@ -57,3 +57,21 @@ It reports the gateway, the MAC (Cisco and colon formats), each L2 hop and the f
 Then take the MAC to Ordr or ISE to say what the device is. Exit codes: 0 = switchport found, 1 = not found, 2 = setup error.
 
 Follow the ground rules and the Rules section in CLAUDE.md (helpers only, read-only, never print credentials).
+
+## NetBox commands (the inventory)
+
+```
+python netbox_helper.py sites --name Lake
+python netbox_helper.py devices --site Lakeside [--tag wan_router] [--role wan] [--name wlc]
+python netbox_helper.py devices --site Lakeside --summary [role,model]   # counts instead of rows
+python netbox_helper.py device lakeview-wlc-ha01        # full record: site, role, model, serial, platform, primary IP, tags
+python netbox_helper.py vc wp-6flr                      # virtual chassis (stack): master, members, positions, serials
+python netbox_helper.py ip 10.158.8.21                  # which device and interface has an IP
+python netbox_helper.py prefix 10.158.10.25             # prefixes (site, VLAN, VRF, role) containing an IP
+python netbox_helper.py prefixes --site Tulane [--vlan 700] [--vrf buyer] [--search text]   # subnet -> site list
+python netbox_helper.py tags
+```
+
+`--site` accepts a site name, a slug or a unique part of a name. `--json` gives full output.
+
+**Virtual chassis (switch stacks):** NetBox models a stack as a virtual chassis, for example `wp-6flr` with members `wp-6flr(1)` to `wp-6flr(7)`, and usually only the master has a management IP. Device lookups (`devices`, and `cisco_helper.py -d/--site/--name`) return each stack as **one** device, named after the virtual chassis, connecting to the master's IP, and listing its `members`. Use `devices --members` to list members separately, and `vc <name>` for member details.

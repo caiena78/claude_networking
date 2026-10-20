@@ -243,6 +243,7 @@ def main() -> int:
     ap.add_argument("--module", help="schema: YANG module name to print (get-schema, read-only)")
     ap.add_argument("--config", action="store_true", help="get: read the running config instead of operational data")
     ap.add_argument("--timeout", type=int, default=30)
+    ap.add_argument("--max-chars", type=int, default=20000, help="get/schema: cut the printed XML here (0 = no limit)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     if args.command == "list":
@@ -283,6 +284,10 @@ def main() -> int:
         else:
             row["netconf"] = "port closed"
         rows.append(row)
+    for r in rows:
+        xml = r.get("xml") or ""
+        if args.max_chars and len(xml) > args.max_chars:
+            r["xml"] = xml[:args.max_chars] + f"\n... cut at {args.max_chars} of {len(xml)} characters (--max-chars 0 for all)"
     if args.json:
         print(json.dumps(rows, indent=2))
     else:

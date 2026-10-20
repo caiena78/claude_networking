@@ -11,6 +11,8 @@
       "Bash(python endpoint_helper.py:*)",
       "Bash(python audit_helper.py:*)",
       "Bash(python report_helper.py:*)",
+      "Bash(python netconf_helper.py:*)",
+      "Bash(python thousandeyes_helper.py:*)",
       "Bash(python -m pytest:*)",
       "PowerShell(python netbox_helper.py:*)",
       "PowerShell(python cisco_helper.py:*)",
@@ -22,6 +24,8 @@
       "PowerShell(python endpoint_helper.py:*)",
       "PowerShell(python audit_helper.py:*)",
       "PowerShell(python report_helper.py:*)",
+      "PowerShell(python netconf_helper.py:*)",
+      "PowerShell(python thousandeyes_helper.py:*)",
       "PowerShell(python -m pytest:*)"
     ],
     "deny": [
