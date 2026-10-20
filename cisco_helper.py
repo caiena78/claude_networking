@@ -95,6 +95,8 @@ COMMANDS: dict[str, tuple[str, str, str | None, str | None]] = {
                      "show wlan summary", None, "required"),
     "ssid-count":   ("clients per SSID on a 9800 (one show wlan summary + one client summary); "
                      "defaults to every 9800 in NetBox", "show wlan summary", None, None),
+    "ssid-clients": ("MACs of the clients on one SSID on a 9800, one per line (use -o FILE, then "
+                     "ordr_helper.py devices --macs-file FILE --summary for manufacturers)", "show wlan summary", None, "required"),
     "wclient":      ("wireless client by MAC on the WLCs (9800 and AireOS): AP, SSID, VLAN, IP, state, user; "
                      "defaults to every WLC in NetBox", "show wireless client mac-address {arg} detail", None, "required"),
 }
@@ -627,6 +629,12 @@ class CiscoRunner:
                 if device["device_type"] == "cisco_wlc_ssh":
                     raise CiscoError("AireOS WLC: ssid-auth supports Catalyst 9800 only")
                 command = f"ssid-auth {arg} (show wlan summary, show wireless client summary, client detail per client)"
+            elif command_name == "ssid-clients":
+                if not arg:
+                    raise CiscoError("'ssid-clients' needs an SSID name")
+                if device["device_type"] == "cisco_wlc_ssh":
+                    raise CiscoError("AireOS WLC: ssid-clients supports Catalyst 9800 only")
+                command = f"ssid-clients {arg} (show wlan summary, show wireless client summary)"
             elif command_name == "ssid-count":
                 if device["device_type"] == "cisco_wlc_ssh":
                     raise CiscoError("AireOS WLC: ssid-count supports Catalyst 9800 only")
@@ -654,6 +662,14 @@ class CiscoRunner:
                 with self.connect(device) as conn:
                     if command_name == "ssid":
                         output = self._collect_ssid(conn, arg, self.timeout)
+                    elif command_name == "ssid-clients":
+                        ids = wlan_ids_for_ssid(conn.send_command(validate_show("show wlan summary"),
+                                                                  read_timeout=self.timeout * 4), arg)
+                        summary = conn.send_command(validate_show("show wireless client summary"),
+                                                    read_timeout=self.timeout * 4)
+                        macs = clients_on_wlans(summary, ids) if ids else []
+                        result["ssid_clients"] = [mac_formats(parse_mac(m))["colon"] for m in macs]
+                        output = "\n".join(result["ssid_clients"]) or f"(no clients on {arg})"
                     elif command_name == "ssid-count":
                         result["ssid_counts"] = self._collect_ssid_counts(conn, self.timeout)
                         output = table([{**r, "wlan_ids": ",".join(r["wlan_ids"])} for r in result["ssid_counts"]],
@@ -1105,7 +1121,7 @@ def main() -> int:
             args.tag = "wan_router"  # route lookups default to every WAN router
     wclient = args.command == "wclient"
     ssid_auth = args.command == "ssid-auth"
-    default_wlcs = (wclient or ssid_auth or args.command == "ssid-count") and not (args.device or args.site or args.tag or args.name)
+    default_wlcs = (wclient or ssid_auth or args.command in ("ssid-count", "ssid-clients")) and not (args.device or args.site or args.tag or args.name)
     if default_wlcs:
         args.name = "wlc"  # every NetBox device with "wlc" in its name
         args.max_devices = max(args.max_devices, 60)
@@ -1120,7 +1136,7 @@ def main() -> int:
         devices = runner.resolve(args.device, args.site, args.tag, args.name, args.device_type)
         if default_wlcs:
             devices = [d for d in devices if is_ip(d["host"])]  # standby units have no management IP
-            if ssid_auth or args.command == "ssid-count":
+            if ssid_auth or args.command in ("ssid-count", "ssid-clients"):
                 devices = [d for d in devices if d["device_type"] != "cisco_wlc_ssh"]  # 9800 only
     except (CiscoError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -298,6 +298,8 @@ def main() -> int:
     p.add_argument("--conn-status", dest="connStatus",
                    help="ONLINE, OFFLINE, ONLINE_IN_LAST_24_HRS, ONLINE_IN_LAST_WEEK, OFFLINE_IN_LAST_24_HRS, OFFLINE_IN_LAST_WEEK")
     p.add_argument("--iot", action="store_true", help="Only IoT devices")
+    p.add_argument("--macs-file", help="Only devices whose MAC appears in this text file (any layout, e.g. the output "
+                   "of cisco_helper.py ssid-clients); prints how many of the file's MACs Ordr doesn't know")
     p.add_argument("--include", help="e.g. connectivity-info, clinical-info, asset-info")
     p.add_argument("--limit", type=int, default=100, help="Max devices to return (default 100; 0 = all)")
     _add_summary_args(p, DEVICE_SUMMARY_FIELDS)
@@ -353,7 +355,13 @@ def main() -> int:
                                                  "subcategory", "riskState", "connStatus", "include")}
         if args.iot:
             filters["iot"] = True
-        _emit_rows(out, args, o.devices(max_items=args.limit or None, **filters), DEVICE_COLUMNS, DEVICE_SUMMARY_FIELDS)
+        rows = o.devices(max_items=args.limit or None, **filters)
+        if args.macs_file:
+            with open(args.macs_file, encoding="utf-8") as fh:
+                wanted = {normalize_mac(m) for m in re.findall(r"(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}", fh.read(), re.I)}
+            rows = [r for r in rows if normalize_mac(r.get("MacAddress") or "") in wanted]
+            out.add(f"{len(wanted)} MACs in {args.macs_file}; Ordr knows {len(rows)}, {len(wanted) - len(rows)} not found")
+        _emit_rows(out, args, rows, DEVICE_COLUMNS, DEVICE_SUMMARY_FIELDS)
     elif args.cmd == "alarms":
         filters = {"mac": normalize_mac(args.mac) if args.mac else None, "ip": args.ip,
                    "severity-level": args.severity, "category": args.category}
