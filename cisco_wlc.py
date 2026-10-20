@@ -160,11 +160,15 @@ def collect_ssid_auth(conn: Any, ssid: str, timeout: int, device: dict[str, Any]
     return {"ssid": ssid, "wlan_ids": ids, "clients": len(macs), "by_eap": dict(eap.most_common())}
 
 def collect_ssid_clients(conn: Any, ssid: str, timeout: int, device: dict[str, Any]) -> list[str]:
-    """MACs (aa:bb:cc:dd:ee:ff) of a WLC's clients on one SSID."""
+    """MACs (aa:bb:cc:dd:ee:ff) of a WLC's clients on one SSID, or on every SSID when ssid is '*'."""
     wlan_cmd, client_cmd, _ = wlc_commands(device)
+    if ssid == "*":
+        summary = send(conn, client_cmd, timeout)
+        return [mac_formats(mac)["colon"] for mac, _ in parse_client_summary(summary)]
     ids = wlan_ids_for_ssid(send(conn, wlan_cmd, timeout), ssid)
     summary = send(conn, client_cmd, timeout) if ids else ""
     return [mac_formats(m)["colon"] for m in clients_on_wlans(summary, ids)]
+
 
 def collect_ssid_counts(conn: Any, timeout: int, device: dict[str, Any]) -> list[dict[str, Any]]:
     """Clients per SSID on a WLC (an SSID on several WLAN profiles is summed), biggest first."""

@@ -111,7 +111,7 @@ COMMANDS: dict[str, tuple[str, str, str | None, str | None]] = {
                      "show wlan summary", None, "required"),
     "ssid-count":   ("clients per SSID (one show wlan summary + one client summary); "
                      "defaults to every WLC in NetBox", "show wlan summary", None, None),
-    "ssid-clients": ("MACs of the clients on one SSID, one per line (use -o FILE, then "
+    "ssid-clients": ("MACs of the clients on one SSID (or * for every SSID), one per line (use -o FILE, then "
                      "ordr_helper.py devices --macs-file FILE --summary for manufacturers)", "show wlan summary", None, "required"),
     "wclient":      ("wireless client by MAC on the WLCs (9800 and AireOS): AP, SSID, VLAN, IP, state, user; "
                      "defaults to every WLC in NetBox", "show wireless client mac-address {arg} detail", None, "required"),
