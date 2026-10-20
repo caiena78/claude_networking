@@ -127,6 +127,7 @@ AIREOS_COMMANDS = {
     "cpu": "show cpu", "memory": "show memory statistics", "clock": "show time", "ntp": "show time",
     "license": "show license summary", "users": "show loginsession", "wlans": "show wlan summary",
     "run": "show run-config",
+    "arp": "show arp switch||show arp switch",  # client IP, MAC, port, VLAN; an IP argument is not used
 }
 
 # Output of these commands can include config, so secrets are masked.

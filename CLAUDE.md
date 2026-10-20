@@ -23,7 +23,9 @@ Each task's guide is a project skill under `.claude/skills/`. Load it before doi
 | `catalyst-center` | `catalyst_helper.py` | Managed device inventory and assurance: health, issues, configs, where a client MAC is connected |
 | `ise` | `ise_helper.py` | Authentication: where and how a MAC/IP/user authenticated, failures, NADs, policy sets; fastest EAP-TLS vs PEAP split per SSID |
 | `cdo-firewall-policy` | `cdo_helper.py` | FTD config and policy: does a prefilter/access rule allow this, NAT, interfaces, routes, objects |
-| `ftd-packet-captures` | `ftd_capture_helper.py` | Live "is this traffic allowed?" captures on the FTDs (the only write action) |
+| `ftd-packet-captures` | `nmap_helper.py` | Ping sweeps and TCP/UDP port scans with nmap: private IPv4 only, size/rate capped, no scripts or evasion options, logged to `scans/audit.log` |
+| `ftd_capture_helper.py` | Live "is this traffic allowed?" captures on the FTDs (the only write action) |
+| `nmap` | `nmap_helper.py` | Ping sweeps and port scans of internal addresses (which hosts answer, which ports are open, which live IPs NetBox doesn't know); size- and rate-limited, logged |
 | `thousandeyes` | `thousandeyes_helper.py` | ThousandEyes tests, agents, alerts, account groups (token in env var `TE_API`) |
 | `bgp-community` | `bgp_community.py` | BGP communities and AS per WAN router; the site/router map in `bgp_community.txt` |
 
@@ -58,6 +60,7 @@ Vault secrets at `VAULT_MOUNT`/`VAULT_PATH`: `ansible_user`, `ansible_password`,
 - `TE_API`, `CDO_UUID`, `CDO_API`, `CISCO_SRV_ACCOUNT` and `CISCO_SRV_PWD` are environment variables. Never print them, log them or write them to a file.
 - Never put secrets in `.env`. Do not touch `.env.old`.
 - **Devices:** only read-only `show` commands over SSH, and NETCONF `get`, `get-config` and `get-schema` (never `edit-config`, `commit`, `lock` or other RPCs). `cisco_helper.py` checks TCP 830 before it runs a command and uses NETCONF when the command has a NETCONF version (`--transport auto|netconf|ssh`), else SSH. No config mode, no `write`, no `clear`, no `reload`, nothing that changes state. Run them only when the user asks for information from the devices, and keep to the devices the question needs. **The one exception** is `ftd_capture_helper.py`, which may create, start, stop and remove packet captures on any firewall with platform `ftd` in NetBox (no separate allow list) under the rules in the `ftd-packet-captures` skill.
+- **Scans:** `nmap_helper.py` is the only way to run nmap, and only for ping sweeps and port scans of internal addresses the user names. Don't scan on your own initiative, don't scan ranges bigger than the question needs, and don't work around its limits (see the `nmap` skill).
 - **Every other system is read-only and goes through its helper, which only sends `GET`** (Catalyst Center also POSTs for its auth token). Never send `POST`, `PUT` or `DELETE` to Meraki, Catalyst Center, ISE, Ordr or CDO/FMC unless the user explicitly asks for that specific change and confirms it. That includes Catalyst Command Runner, templates, provisioning, reboots and syncs; ISE CoA, reauthenticate or disconnect (`/admin/API/mnt/CoA/...`); and Ordr's alarm, vulnerability, asset, onboarding and user write endpoints.
 
 ## Setup
