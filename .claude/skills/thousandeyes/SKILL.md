@@ -7,7 +7,7 @@ description: Cisco ThousandEyes through thousandeyes_helper.py: synthetic tests,
 
 Use ThousandEyes for synthetic-monitoring questions: which tests exist, which agents are online, which alerts are active. It is not the inventory (NetBox is).
 
-**Always use `thousandeyes_helper.py`.** No ad-hoc `requests` calls. It reads your personal bearer token from the environment variable `TE_API` (not Vault; never print it, log it or write it to a file), calls the v7 API at `https://api.thousandeyes.com/v7/`, follows `_links.next` pagination and retries on `429`. It only sends `GET`.
+**Always use `thousandeyes_helper.py`.** No ad-hoc `requests` calls. It reads the bearer token from the Vault secret `TE_API` (never print it, log it or write it to a file), calls the v7 API at `https://api.thousandeyes.com/v7/`, follows `_links.next` pagination and retries on `429`. It only sends `GET`.
 
 ```
 python thousandeyes_helper.py test                         # connectivity + token check

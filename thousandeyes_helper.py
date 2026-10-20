@@ -1,6 +1,6 @@
 """Read-only access to the ThousandEyes v7 REST API (api.thousandeyes.com).
 
-The credential is your personal bearer token in the environment variable TE_API (never Vault, never printed).
+The credential is the bearer token in the Vault secret TE_API (never printed).
 The client only issues GET requests, so it can't create, change or delete tests, agents or alert rules.
 
 API reference: https://developer.cisco.com/docs/thousandeyes/
@@ -53,9 +53,14 @@ class ThousandEyes:
     """Minimal read-only ThousandEyes v7 client with _links.next pagination and 429 retry."""
 
     def __init__(self, token: str | None = None, timeout: int = 60):
-        token = token or os.environ.get("TE_API")
         if not token:
-            raise ThousandEyesError("TE_API environment variable is not set")
+            import vault_helper
+
+            try:
+                token = vault_helper.get_secret("TE_API", interactive=False)
+            except Exception as exc:  # noqa: BLE001 - no Vault login, or the secret is missing
+                raise ThousandEyesError(f"could not read TE_API from Vault ({type(exc).__name__}); sign in with "
+                                        "vault_login.ps1 and check the secret exists") from exc
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/json"})
         self.timeout = timeout
@@ -139,7 +144,7 @@ def _match(rows: list, field: str, text: str | None) -> list:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read-only ThousandEyes helper (token in env var TE_API)")
+    parser = argparse.ArgumentParser(description="Read-only ThousandEyes helper (token in the Vault secret TE_API)")
     parser.add_argument("--json", action="store_true", help="print JSON")
     parser.add_argument("-o", "--output", help="also write the output to this file")
     parser.add_argument("--append", action="store_true", help="with -o: append")
