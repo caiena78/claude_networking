@@ -12,6 +12,7 @@ Usage:
     python nmap_helper.py sweep 10.158.8.0/24                       # which addresses answer
     python nmap_helper.py sweep 10.158.8.0/24 --netbox              # and which of them NetBox doesn't know
     python nmap_helper.py sweep 10.158.8.0/24 --tcp-ping 22,443     # also probe these TCP ports (hosts that drop ICMP)
+    python nmap_helper.py sweep 10.158.8.0/24 --icmp-only           # ICMP echo only: no false "up" from firewalls that reset TCP probes
     python nmap_helper.py ports 10.158.8.21 --ports 22,80,443,8443  # TCP connect scan of chosen ports
     python nmap_helper.py ports 10.158.8.0/28 --top 100             # the 100 most common ports
     python nmap_helper.py ports lakeview-wlc-ha01 --ports all       # all 65535 TCP ports (16 addresses at most)
@@ -152,7 +153,8 @@ def check_limits(mode: str, count: int, max_targets: int, ports: int = 0, udp: b
 
 def build_command(nmap: str, mode: str, nets: list[ipaddress.IPv4Network], exclude: list[ipaddress.IPv4Network],
                   *, ports: str | None = None, top: int | None = None, udp: bool = False, syn: bool = False,
-                  no_ping: bool = False, tcp_ping: str | None = None, dns: bool = False, all_states: bool = False,
+                  no_ping: bool = False, tcp_ping: str | None = None, icmp_only: bool = False, dns: bool = False,
+                  all_states: bool = False,
                   timing: int = MAX_TIMING, rate: int = DEFAULT_RATE) -> list[str]:
     """The nmap argument list. Every value in it was validated above, and it is run without a shell."""
     if not 1 <= timing <= MAX_TIMING:
@@ -164,7 +166,9 @@ def build_command(nmap: str, mode: str, nets: list[ipaddress.IPv4Network], exclu
         cmd.append("-n")
     if mode == "sweep":
         cmd.append("-sn")
-        if tcp_ping:
+        if icmp_only:  # a -P option replaces nmap's default probes (ICMP echo, TCP 443 and 80, ICMP timestamp)
+            cmd.append("-PE")
+        elif tcp_ping:
             cmd.append(f"-PS{validate_ports(tcp_ping)[0]}")
     else:
         cmd.append("-sU" if udp else ("-sS" if syn else "-sT"))
@@ -241,26 +245,34 @@ def run_nmap(cmd: list[str], timeout: int) -> dict[str, Any]:
     return parse_xml(done.stdout)
 
 
-def annotate_netbox(hosts: list[dict[str, Any]], limit: int = 256) -> None:
-    """Add 'netbox' to each host: the NetBox device/interface that has the IP, or '-' when NetBox doesn't know it."""
+def annotate_netbox(hosts: list[dict[str, Any]], limit: int = 256) -> bool:
+    """Add 'netbox' to each host: the NetBox device/interface that has the IP, or '-' when NetBox doesn't know it.
+    Returns False (and adds nothing) when more than `limit` hosts answered, to keep NetBox lookups reasonable."""
+    if len(hosts) > limit:
+        return False
     import netbox_helper
     import vault_helper
 
     secrets = vault_helper.get_secrets(interactive=False)
     nb = netbox_helper.connect(secrets["netbox_url"], secrets["netbox_token"])
-    for h in hosts[:limit]:
+    for h in hosts:
         rows = netbox_helper.ip_lookup(nb, h["ip"])
         h["netbox"] = ", ".join(f"{r['device'] or r['dns_name'] or 'unassigned'}" + (f" {r['interface']}" if r["interface"] else "")
                                 for r in rows) or "-"
-    for h in hosts[limit:]:
-        h["netbox"] = "(not checked)"
+    return True
 
 
 def format_result(mode: str, result: dict[str, Any], count: int) -> str:
     hosts = result["hosts"]
     if mode == "sweep":
-        cols = ["IP=ip", "Hostname=hostname", "MAC=mac", "Vendor=vendor"] + (["NetBox=netbox"] if hosts and "netbox" in hosts[0] else [])
+        cols = ["IP=ip", "Hostname=hostname", "MAC=mac", "Vendor=vendor", "Answered by=reason"] + (
+            ["NetBox=netbox"] if hosts and "netbox" in hosts[0] else [])
         body = table(hosts, cols)
+        resets = sum(1 for h in hosts if h["reason"] == "reset")
+        if resets:
+            body += (f"\n\nNote: {resets} addresses answered only with a TCP reset (reason 'reset'). A firewall or proxy "
+                     "in the path often does that for addresses with no host behind them, so they are not reliably hosts. "
+                     "Re-run with --icmp-only for a stricter answer (ICMP echo replies only).")
     else:
         rows = [{**h, "open": ", ".join(f"{p['port']}/{p['protocol']} {p['service']}".strip() for p in h["ports"]) or "-"}
                 for h in hosts]
@@ -288,6 +300,8 @@ def main() -> int:
         p.add_argument("--append", action="store_true")
     sw = sub.choices["sweep"]
     sw.add_argument("--tcp-ping", metavar="PORTS", help="also probe these TCP ports to find hosts that drop ICMP, e.g. 22,443")
+    sw.add_argument("--icmp-only", action="store_true",
+                    help="use ICMP echo only (no TCP probes): stricter, and avoids firewalls that reset TCP probes")
     sw.add_argument("--netbox", action="store_true", help="show which NetBox device has each address that answers")
     pt = sub.choices["ports"]
     group = pt.add_mutually_exclusive_group()
@@ -313,7 +327,8 @@ def main() -> int:
         cmd = build_command(nmap, args.mode, nets, exclude, ports=port_spec,
                             top=getattr(args, "top", None), udp=getattr(args, "udp", False),
                             syn=getattr(args, "syn", False), no_ping=getattr(args, "no_ping", False),
-                            tcp_ping=getattr(args, "tcp_ping", None), dns=args.dns,
+                            tcp_ping=getattr(args, "tcp_ping", None),
+                            icmp_only=getattr(args, "icmp_only", False), dns=args.dns,
                             all_states=getattr(args, "all_states", False), timing=args.timing, rate=args.rate)
         if args.dry_run:
             out.add(f"{count} addresses in {', '.join(str(n) for n in nets)}\n" + " ".join(cmd))
@@ -323,7 +338,8 @@ def main() -> int:
         print(f"... {args.mode} of {count} addresses", file=sys.stderr)
         result = run_nmap(cmd, args.timeout)
         if args.mode == "sweep" and args.netbox:
-            annotate_netbox(result["hosts"])
+            if not annotate_netbox(result["hosts"]):
+                print("... NetBox check skipped: more than 256 addresses answered", file=sys.stderr)
     except ScanError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

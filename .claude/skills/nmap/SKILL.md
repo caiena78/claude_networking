@@ -11,6 +11,7 @@ description: Ping sweeps and port scans of internal addresses through nmap_helpe
 python nmap_helper.py sweep 10.158.8.0/24                       # which addresses answer
 python nmap_helper.py sweep 10.158.8.0/24 --netbox              # and which NetBox device has each one ("-" = NetBox doesn't know it)
 python nmap_helper.py sweep 10.158.8.0/24 --tcp-ping 22,443     # also probe TCP ports, for hosts that drop ICMP
+python nmap_helper.py sweep 10.158.8.0/24 --icmp-only           # ICMP echo only: the reliable "is a host there" test across firewalls
 python nmap_helper.py ports 10.158.8.21 --ports 22,80,443,8443  # TCP connect scan of chosen ports
 python nmap_helper.py ports 10.158.8.0/28 --top 100             # the N most common ports (10,20,50,100,200,500,1000)
 python nmap_helper.py ports lakeview-wlc-ha01 --ports all       # all TCP ports (16 addresses at most)
@@ -26,6 +27,7 @@ Targets: an IP, a CIDR, a range (`10.1.1.10-50` or `10.1.1.10-10.1.2.20`) or an 
 - **Limits the helper enforces (don't try to get around them):** private IPv4 only (no public, loopback, link-local or multicast addresses); 1,024 addresses per scan (`--max-targets`, hard limit 4,096); 300 packets/s by default (`--rate`, max 1,000); nmap timing `-T3` at most; scans of more than 1,024 ports limited to 16 addresses; UDP limited to 64 addresses and 100 ports.
 - **Not available, on purpose:** NSE scripts, OS and version detection, and any spoofing, decoy, fragmentation or other evasion option. Don't add them.
 - Every scan is logged to `scans/audit.log` (git-ignored): UTC time, local user, targets and the exact command.
+- **Read the `Answered by` column.** `echo-reply` is a real host. `reset` means a TCP reset came back, which a firewall or proxy in the path often sends for addresses with nothing behind them (a sweep of a whole /22 once showed 1,016 of 1,024 "up" that way). If many addresses answer by `reset`, re-run with `--icmp-only` and trust that result.
 - A host that doesn't answer discovery is reported as down. If the user expects it up, retry with `--tcp-ping` or `--no-ping`, and say that a silent result is not proof the address is unused (firewalls drop probes).
 - NetBox is still the inventory: to say what a responding address is, use `--netbox`, then `netbox_helper.py`, `ordr_helper.py` or `whois` (network-reports skill).
 

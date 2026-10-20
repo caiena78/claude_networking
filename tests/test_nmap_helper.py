@@ -75,3 +75,10 @@ def test_nmap_not_found(monkeypatch, capsys):
 def test_nmap_found_on_path(monkeypatch):
     monkeypatch.setattr(n.shutil, "which", lambda name: "/usr/bin/nmap")
     assert n.find_nmap() == "/usr/bin/nmap"
+
+
+def test_icmp_only_replaces_default_probes():
+    nets = n.parse_targets(["10.1.1.0/30"])
+    cmd = n.build_command("nmap", "sweep", nets, [], icmp_only=True, tcp_ping="22")
+    assert "-sn" in cmd and "-PE" in cmd and not any(c.startswith("-PS") for c in cmd)
+    assert "-PE" not in n.build_command("nmap", "sweep", nets, [])
