@@ -200,3 +200,9 @@ def test_ssid_auth_parsers():
     assert c.clients_on_wlans(CLIENT_SUMMARY, ["13", "2416"]) == ["0017.2388.7faa", "6887.c64f.a5ba"]
     assert c.parse_eap_type("Policy Type : WPA2\nEAP Type : EAP-TLS\nVLAN : x\n") == "EAP-TLS"
     assert c.parse_eap_type("Client State : Associated\n") == "(none)"
+
+
+def test_ssid_count_parsers():
+    rows = c.wlan_rows(WLAN_SUMMARY)
+    assert rows["13"] == ("LCMC-VOIP_profile", "LCMC-VOIP", "UP") and rows["2416"][1] == "EJGH-VOICE"
+    assert c.client_counts_by_wlan(CLIENT_SUMMARY) == {"13": 1, "2416": 1, "11": 1}

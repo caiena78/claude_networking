@@ -41,6 +41,8 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from helper_common import table
+
 # name: (help text, IOS / IOS-XE command, NX-OS command or None for "same", argument: None / "required" / "optional")
 # In commands, {arg} is replaced with the argument. Optional-argument commands list the no-argument form after "||".
 COMMANDS: dict[str, tuple[str, str, str | None, str | None]] = {
@@ -91,6 +93,8 @@ COMMANDS: dict[str, tuple[str, str, str | None, str | None]] = {
                      "show wlan summary", None, "required"),
     "ssid-auth":    ("clients on one SSID by EAP type (PEAP, EAP-TLS...) on 9800 WLCs; defaults to every 9800 in NetBox",
                      "show wlan summary", None, "required"),
+    "ssid-count":   ("clients per SSID on a 9800 (one show wlan summary + one client summary); "
+                     "defaults to every 9800 in NetBox", "show wlan summary", None, None),
     "wclient":      ("wireless client by MAC on the WLCs (9800 and AireOS): AP, SSID, VLAN, IP, state, user; "
                      "defaults to every WLC in NetBox", "show wireless client mac-address {arg} detail", None, "required"),
 }
@@ -376,6 +380,18 @@ def wlan_ids_for_ssid(wlan_summary: str, ssid: str) -> list[str]:
     return [i for i, prof, name in rows if ssid.lower() in (prof.strip().lower(), name.strip().lower())]
 
 
+def wlan_rows(wlan_summary: str) -> dict[str, tuple[str, str, str]]:
+    """WLAN ID -> (profile, SSID, status) from 'show wlan summary'."""
+    rows = re.findall(r"^\s*(\d+)\s+(.+?)\s{2,}(.+?)\s{2,}(UP|DOWN)\b", wlan_summary, re.M | re.I)
+    return {i: (prof.strip(), name.strip(), st.upper()) for i, prof, name, st in rows}
+
+
+def client_counts_by_wlan(client_summary: str) -> Counter:
+    """Clients per WLAN ID in 'show wireless client summary'."""
+    return Counter(m.group(1) for m in re.finditer(
+        r"^\s*[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}\s.*?\bWLAN\s+(\d+)\b", client_summary, re.M | re.I))
+
+
 def clients_on_wlans(client_summary: str, wlan_ids: list[str]) -> list[str]:
     """MACs (aaaa.bbbb.cccc) of clients on those WLAN IDs in 'show wireless client summary'."""
     macs = []
@@ -527,6 +543,22 @@ class CiscoRunner:
         eap = Counter(parse_eap_type(show(f"show wireless client mac-address {mac} detail")) for mac in macs)
         return {"ssid": ssid, "wlan_ids": ids, "clients": len(macs), "by_eap": dict(eap.most_common())}
 
+    @staticmethod
+    def _collect_ssid_counts(conn: Any, timeout: int) -> list[dict[str, Any]]:
+        """Clients per SSID on a Catalyst 9800 (an SSID on several WLAN profiles is summed), biggest first."""
+        def show(command: str) -> str:
+            return conn.send_command(validate_show(command), read_timeout=timeout * 4)
+
+        wlans = wlan_rows(show("show wlan summary"))
+        counts = client_counts_by_wlan(show("show wireless client summary"))
+        by_ssid: dict[str, dict[str, Any]] = {}
+        for wid in sorted(set(wlans) | set(counts), key=int):
+            _, ssid, status = wlans.get(wid, ("", f"(unknown WLAN {wid})", ""))
+            row = by_ssid.setdefault(ssid, {"ssid": ssid, "wlan_ids": [], "status": status, "clients": 0})
+            row["wlan_ids"].append(wid)
+            row["clients"] += counts.get(wid, 0)
+        return sorted(by_ssid.values(), key=lambda r: -r["clients"])
+
     def connect(self, device: dict[str, Any]) -> Any:
         """Open an SSH session to a device (in enable mode when possible). Use it as a context manager."""
         from netmiko import ConnectHandler
@@ -595,6 +627,10 @@ class CiscoRunner:
                 if device["device_type"] == "cisco_wlc_ssh":
                     raise CiscoError("AireOS WLC: ssid-auth supports Catalyst 9800 only")
                 command = f"ssid-auth {arg} (show wlan summary, show wireless client summary, client detail per client)"
+            elif command_name == "ssid-count":
+                if device["device_type"] == "cisco_wlc_ssh":
+                    raise CiscoError("AireOS WLC: ssid-count supports Catalyst 9800 only")
+                command = "ssid-count (show wlan summary, show wireless client summary)"
             elif command_name == "wclient":
                 mac = parse_mac(arg or "")
                 if not mac:
@@ -618,6 +654,10 @@ class CiscoRunner:
                 with self.connect(device) as conn:
                     if command_name == "ssid":
                         output = self._collect_ssid(conn, arg, self.timeout)
+                    elif command_name == "ssid-count":
+                        result["ssid_counts"] = self._collect_ssid_counts(conn, self.timeout)
+                        output = table([{**r, "wlan_ids": ",".join(r["wlan_ids"])} for r in result["ssid_counts"]],
+                                       ["SSID=ssid", "WLAN IDs=wlan_ids", "Status=status", "Clients=clients"])
                     elif command_name == "ssid-auth":
                         result["ssid_auth"] = self._collect_ssid_auth(conn, arg, self.timeout)
                         output = json.dumps(result["ssid_auth"])
@@ -1065,7 +1105,7 @@ def main() -> int:
             args.tag = "wan_router"  # route lookups default to every WAN router
     wclient = args.command == "wclient"
     ssid_auth = args.command == "ssid-auth"
-    default_wlcs = (wclient or ssid_auth) and not (args.device or args.site or args.tag or args.name)
+    default_wlcs = (wclient or ssid_auth or args.command == "ssid-count") and not (args.device or args.site or args.tag or args.name)
     if default_wlcs:
         args.name = "wlc"  # every NetBox device with "wlc" in its name
         args.max_devices = max(args.max_devices, 60)
@@ -1080,7 +1120,7 @@ def main() -> int:
         devices = runner.resolve(args.device, args.site, args.tag, args.name, args.device_type)
         if default_wlcs:
             devices = [d for d in devices if is_ip(d["host"])]  # standby units have no management IP
-            if ssid_auth:
+            if ssid_auth or args.command == "ssid-count":
                 devices = [d for d in devices if d["device_type"] != "cisco_wlc_ssh"]  # 9800 only
     except (CiscoError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

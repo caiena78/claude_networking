@@ -35,6 +35,7 @@ python cisco_helper.py show "show ip nat translations total" -d tls-wan-rtr-01  
 python cisco_helper.py wlans -d lakeview-wlc-ha01                 # Catalyst 9800: WLAN/SSID summary
 python cisco_helper.py ssid LCMC-DATA -d lakeview-wlc-ha01 -o lakeviewssid.txt   # all config for an SSID
 python cisco_helper.py ssid LCMC-VOIP -d lakeview-wlc-ha01 -o lakeviewssid.txt --append
+python cisco_helper.py ssid-count -d lakeview-wlc-ha01              # clients per SSID on a 9800 (fast: two commands); no -d = every 9800
 python cisco_helper.py ssid-auth LCMC-VOIP                     # clients on an SSID by EAP type (PEAP vs EAP-TLS) on every 9800; add -d/--site to narrow
 python cisco_helper.py wclient 78:02:8b:19:63:0e                  # wireless client on every WLC in NetBox (9800 + AireOS): AP, SSID, VLAN, IP, user
 python cisco_helper.py wclient <mac> -d umc-wlc-8540-01            # one controller; anchor/foreign mobility is shown
